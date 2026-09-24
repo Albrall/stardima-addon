@@ -123,10 +123,8 @@ async function handleCatalog(req, res, type, id, query) {
   const cached = cacheGet(cacheKey, 10 * 60 * 1000);
   if (cached) return sendJson(res, 200, cached);
   try {
-    let items = await stardima.getCatalog({ search });
-    // filter by requested type
-    items = items.filter((it) => it.type === type);
-    const metas = items.slice(skip, skip + 50).map((it) => ({
+    const items = await stardima.getCatalog({ search, type, skip, limit: 50 });
+    const metas = items.map((it) => ({
       id: 'stardima:' + it.slug,
       type,
       name: it.title,
@@ -520,35 +518,58 @@ function scrapeCards(html) {
   return out;
 }
 
-async function getCatalog({ search } = {}) {
+// Full-library paginated catalog. The site's listing pages expose an AJAX JSON
+// endpoint: GET /mosalsalat?page=N (or /aflam) with X-Requested-With returns
+// { pagination:{last_page}, videos:[...] } with 15 items per page. We serve any
+// [skip, skip+limit) window lazily and cache each upstream page.
+const LIST_ENDPOINT = { series: '/mosalsalat', movie: '/aflam' };
+const PAGE_SIZE = 15;
+const _pageCache = new Map();
+const PAGE_TTL = 6 * 60 * 60 * 1000;
+
+function pageCacheGet(ep, p) {
+  const e = _pageCache.get(ep + ':' + p);
+  if (e && Date.now() - e.t < PAGE_TTL) return e.v;
+  return null;
+}
+function pageCacheSet(ep, p, v) { _pageCache.set(ep + ':' + p, { v, t: Date.now() }); }
+
+function videoToItem(v, fallbackType) {
+  const um = (v.url || '').match(/\/(tvshow|movie)\/([a-z0-9-]+)/i);
+  const type = v.is_series ? 'series' : (um ? (um[1].toLowerCase() === 'movie' ? 'movie' : 'series') : fallbackType);
+  const slug = um ? um[2] : String(v.id);
+  return {
+    id: type + ':' + slug, type, slug,
+    title: decodeEntities(v.title || ''),
+    poster: v.poster_url || v.poster || null,
+    year: v.year || undefined,
+    description: decodeEntities(v.description || '') || undefined,
+  };
+}
+
+async function getCatalog({ search, type, skip, limit } = {}) {
   if (search && search.trim()) return searchCatalog(search);
-  const byId = new Map();
-  for (const p of CATALOG_PAGES) {
-    let html;
-    try { html = await getHtml(p); } catch (e) { continue; }
-    for (const it of scrapeCards(html)) {
-      if (!byId.has(it.id)) byId.set(it.id, it);
-      else {
-        const prev = byId.get(it.id);
-        if (!prev.poster && it.poster) prev.poster = it.poster;
-        const prevBad = !prev.title || /^[0-9a-f]{10,}$/.test(prev.title);
-        const newGood = it.title && !/^[0-9a-f]{10,}$/.test(it.title);
-        if (prevBad && newGood) prev.title = it.title;
-      }
+  const t = type === 'movie' ? 'movie' : 'series';
+  const ep = LIST_ENDPOINT[t];
+  skip = parseInt(skip || 0, 10) || 0;
+  limit = parseInt(limit || 50, 10) || 50;
+  const firstPage = Math.floor(skip / PAGE_SIZE) + 1;
+  const lastPage = Math.floor((skip + limit - 1) / PAGE_SIZE) + 1;
+  const concat = [];
+  let startGlobal = (firstPage - 1) * PAGE_SIZE;
+  for (let p = firstPage; p <= lastPage; p++) {
+    let vids = pageCacheGet(ep, p);
+    if (!vids) {
+      try {
+        const data = await getJson(ep + '?page=' + p, BASE + ep);
+        vids = (data && data.videos) || [];
+        pageCacheSet(ep, p, vids);
+      } catch (e) { vids = []; }
     }
+    if (!vids.length) break;
+    for (const v of vids) concat.push(videoToItem(v, t));
   }
-  const list = [...byId.values()];
-  // Fill in any titles we could not scrape, from the show page's og:title.
-  for (const it of list) {
-    if (it.title && !/^[0-9a-f]{10,}$/.test(it.title)) continue;
-    try {
-      const h = await getHtml('/' + (it.type === 'movie' ? 'movie' : 'tvshow') + '/' + it.slug);
-      const t = metaContent(h, 'og:title');
-      if (t) it.title = decodeEntities(t.split('|')[0].trim());
-      if (!it.poster) it.poster = metaContent(h, 'og:image');
-    } catch (e) { /* keep slug */ }
-  }
-  return list;
+  return concat.slice(skip - startGlobal, skip - startGlobal + limit);
 }
 
 // Search via the site's JSON search endpoint.
