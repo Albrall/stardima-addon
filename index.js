@@ -488,29 +488,67 @@ function metaContent(html, prop) {
 }
 
 // ---- CATALOG ----
-// Scrape the homepage grid cards: <img alt="Poster for TITLE" src=POSTER> followed by <a href=.../tvshow|movie/ID>.
+// The public site spreads its library across a few listing pages (homepage plus
+// category pages). We union them all so the addon shows the maximum public set.
+const CATALOG_PAGES = ['/', '/mosalsalat', '/aflam', '/newrelases'];
+
+function stripTags(s) { return (s || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+function scrapeCards(html) {
+  const out = [];
+  const anchorRe = /<a[^>]*href="[^"]*?\/(tvshow|movie)\/([a-z0-9-]+)(?:\/play\/\d+)?"[^>]*>/gi;
+  let m;
+  while ((m = anchorRe.exec(html)) !== null) {
+    const type = m[1].toLowerCase() === 'movie' ? 'movie' : 'series';
+    const slug = m[2];
+    const before = html.slice(Math.max(0, m.index - 800), m.index);
+    const after = html.slice(m.index, m.index + 900);
+    const alts = [...before.matchAll(/alt="Poster for ([^"]*)"/gi)];
+    const imgs = [...before.matchAll(/<img[^>]*src="([^"]+)"/gi)];
+    let title = alts.length ? decodeEntities(alts[alts.length - 1][1]) : '';
+    const poster = imgs.length ? imgs[imgs.length - 1][1] : null;
+    if (!title) {
+      const bh = [...before.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
+      const ah = (after.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) || [])[1];
+      const h = bh.length ? bh[bh.length - 1][1] : ah;
+      title = h ? decodeEntities(stripTags(h)) : '';
+    }
+    const clean = (title || '').trim();
+    const noEp = clean.replace(/\s*-?\s*حلقة\s*\d+$/, '').trim();
+    out.push({ id: type + ':' + slug, type, slug, title: (!noEp || /^شاهد/.test(noEp)) ? slug : noEp, poster });
+  }
+  return out;
+}
+
 async function getCatalog({ search } = {}) {
   if (search && search.trim()) return searchCatalog(search);
-  const html = await getHtml('/');
-  const items = [];
-  const seen = new Set();
-  // Walk each poster img, then find the next show/movie link after it.
-  const imgRe = /<img[^>]*src="([^"]*(?:storage\/posters|image\.tmdb\.org)[^"]*)"[^>]*alt="Poster for ([^"]*)"[^>]*>/gi;
-  let m;
-  while ((m = imgRe.exec(html)) !== null) {
-    const poster = m[1];
-    const title = decodeEntities(m[2]);
-    const after = html.slice(m.index, m.index + 800);
-    const link = after.match(/href="https:\/\/[^"]*?\/(tvshow|movie)\/([a-z0-9-]+)"/i);
-    if (!link) continue;
-    const type = link[1].toLowerCase() === 'movie' ? 'movie' : 'series';
-    const slug = link[2];
-    const id = type + ':' + slug;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    items.push({ id, type, slug, title, poster });
+  const byId = new Map();
+  for (const p of CATALOG_PAGES) {
+    let html;
+    try { html = await getHtml(p); } catch (e) { continue; }
+    for (const it of scrapeCards(html)) {
+      if (!byId.has(it.id)) byId.set(it.id, it);
+      else {
+        const prev = byId.get(it.id);
+        if (!prev.poster && it.poster) prev.poster = it.poster;
+        const prevBad = !prev.title || /^[0-9a-f]{10,}$/.test(prev.title);
+        const newGood = it.title && !/^[0-9a-f]{10,}$/.test(it.title);
+        if (prevBad && newGood) prev.title = it.title;
+      }
+    }
   }
-  return items;
+  const list = [...byId.values()];
+  // Fill in any titles we could not scrape, from the show page's og:title.
+  for (const it of list) {
+    if (it.title && !/^[0-9a-f]{10,}$/.test(it.title)) continue;
+    try {
+      const h = await getHtml('/' + (it.type === 'movie' ? 'movie' : 'tvshow') + '/' + it.slug);
+      const t = metaContent(h, 'og:title');
+      if (t) it.title = decodeEntities(t.split('|')[0].trim());
+      if (!it.poster) it.poster = metaContent(h, 'og:image');
+    } catch (e) { /* keep slug */ }
+  }
+  return list;
 }
 
 // Search via the site's JSON search endpoint.
