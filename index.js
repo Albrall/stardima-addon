@@ -45,7 +45,7 @@ const manifest = {
 const AR_NUM = ['١','٢','٣','٤','٥','٦','٧','٨','٩','١٠','١١','١٢','١٣','١٤','١٥'];
 let _manifestCache = null; let _manifestCacheT = 0;
 async function buildManifest() {
-  if (_manifestCache && Date.now() - _manifestCacheT < 6 * 3600 * 1000) return _manifestCache;
+  if (_manifestCache && Date.now() - _manifestCacheT < 2 * 3600 * 1000) return _manifestCache;
   let lp = { series: 151, movie: 107 };
   try { lp = await stardima.getLastPages(); } catch (e) { /* fallback */ }
   const extra = [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }];
@@ -553,9 +553,16 @@ const PAGE_SIZE = 15;
 const _pageCache = new Map();
 const PAGE_TTL = 6 * 60 * 60 * 1000;
 
+// Tiered freshness: new releases land on the first pages, so those refresh
+// quickly; deep pages rarely change and stay cached longer.
+function pageTtl(p) {
+  if (p === 1) return 15 * 60 * 1000;        // 15 min
+  if (p <= 5) return 2 * 3600 * 1000;        // 2 h
+  return 12 * 3600 * 1000;                   // 12 h
+}
 function pageCacheGet(ep, p) {
   const e = _pageCache.get(ep + ':' + p);
-  if (e && Date.now() - e.t < PAGE_TTL) return e.v;
+  if (e && Date.now() - e.t < pageTtl(p)) return e.v;
   return null;
 }
 function pageCacheSet(ep, p, v) { _pageCache.set(ep + ':' + p, { v, t: Date.now() }); }
