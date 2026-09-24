@@ -39,12 +39,26 @@ const manifest = {
   resources: ['catalog', 'meta', 'stream'],
   types: ['series', 'movie'],
   idPrefixes: ['stardima:'],
-  catalogs: [
-    { type: 'series', id: 'stardima-series', name: 'ستارديما · مسلسلات', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] },
-    { type: 'movie', id: 'stardima-movies', name: 'ستارديما · أفلام', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] },
-  ],
+  catalogs: [],
   behaviorHints: { adult: false, configurable: false },
 };
+const AR_NUM = ['١','٢','٣','٤','٥','٦','٧','٨','٩','١٠','١١','١٢','١٣','١٤','١٥'];
+let _manifestCache = null; let _manifestCacheT = 0;
+async function buildManifest() {
+  if (_manifestCache && Date.now() - _manifestCacheT < 6 * 3600 * 1000) return _manifestCache;
+  let lp = { series: 151, movie: 107 };
+  try { lp = await stardima.getLastPages(); } catch (e) { /* fallback */ }
+  const extra = [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }];
+  const catalogs = [];
+  const sc = Math.ceil(lp.series / stardima.CHUNK_PAGES);
+  const mc = Math.ceil(lp.movie / stardima.CHUNK_PAGES);
+  for (let i = 0; i < sc; i++) catalogs.push({ type: 'series', id: 'stardima-s' + (i + 1), name: 'ستارديما · مسلسلات ' + (AR_NUM[i] || (i + 1)), extra });
+  for (let i = 0; i < mc; i++) catalogs.push({ type: 'movie', id: 'stardima-m' + (i + 1), name: 'ستارديما · أفلام ' + (AR_NUM[i] || (i + 1)), extra });
+  _manifestCache = Object.assign({}, manifest, { catalogs });
+  _manifestCacheT = Date.now();
+  return _manifestCache;
+}
+
 
 // ---------- proxy helpers ----------
 function b64url(s) { return Buffer.from(s, 'utf8').toString('base64url'); }
@@ -123,8 +137,15 @@ async function handleCatalog(req, res, type, id, query) {
   const cached = cacheGet(cacheKey, 10 * 60 * 1000);
   if (cached) return sendJson(res, 200, cached);
   try {
-    const items = await stardima.getCatalog({ search, type, skip, limit: 5000 });
-    const metas = items.map((it) => ({
+    let items;
+    if (search) items = await stardima.searchCatalog(search);
+    else {
+      const mm = id.match(/^stardima-(s|m)(\d+)$/);
+      const chunk = mm ? parseInt(mm[2], 10) - 1 : 0;
+      items = await stardima.getCatalogChunk(type, chunk);
+    }
+    items = items.filter((it) => it.type === type);
+    const metas = items.slice(skip, skip + 500).map((it) => ({
       id: 'stardima:' + it.slug,
       type,
       name: it.title,
@@ -333,7 +354,7 @@ const server = http.createServer(async (req, res) => {
       return sendText(res, 200, installPage(req), 'text/html; charset=utf-8');
     }
     if (path === '/manifest.json' || path === '/manifest') {
-      return sendJson(res, 200, manifest);
+      return sendJson(res, 200, await buildManifest());
     }
     if (path === '/debug') {
       return handleDebug(req, res);
@@ -536,15 +557,19 @@ function pageCacheSet(ep, p, v) { _pageCache.set(ep + ':' + p, { v, t: Date.now(
 const _lastPage = new Map();
 
 async function fetchPage(ep, p) {
-  let vids = pageCacheGet(ep, p);
-  if (vids) return vids;
-  try {
-    const data = await getJson(ep + '?page=' + p, BASE + ep);
-    vids = (data && data.videos) || [];
-    if (data && data.pagination && data.pagination.last_page) _lastPage.set(ep, data.pagination.last_page);
-    pageCacheSet(ep, p, vids);
-  } catch (e) { vids = []; }
-  return vids;
+  const hit = pageCacheGet(ep, p);
+  if (hit) return hit;
+  let vids = [];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const data = await getJson(ep + '?page=' + p, BASE + ep);
+      vids = (data && data.videos) || [];
+      if (data && data.pagination && data.pagination.last_page) _lastPage.set(ep, data.pagination.last_page);
+      if (vids.length) { pageCacheSet(ep, p, vids); return vids; }
+    } catch (e) { /* retry */ }
+    await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+  }
+  return vids; // do NOT cache empty (avoids poisoning the cache on rate-limit)
 }
 
 // Fetch EVERY page of a listing (chunked concurrency) -> full library list.
@@ -553,9 +578,10 @@ async function getFull(ep, t) {
   const last = _lastPage.get(ep) || 1;
   const pages = [];
   for (let p = 2; p <= last; p++) pages.push(p);
-  for (let i = 0; i < pages.length; i += 20) {
-    const chunk = pages.slice(i, i + 20);
+  for (let i = 0; i < pages.length; i += 10) {
+    const chunk = pages.slice(i, i + 10);
     await Promise.all(chunk.map((p) => fetchPage(ep, p)));
+    await new Promise((r) => setTimeout(r, 120));
   }
   const items = [];
   for (let p = 1; p <= last; p++) {
@@ -564,6 +590,13 @@ async function getFull(ep, t) {
   return items;
 }
 
+function absPoster(u) {
+  if (!u) return null;
+  if (/^https?:/i.test(u)) return u;
+  if (u.startsWith('//')) return 'https:' + u;
+  if (u.startsWith('/')) return BASE + u;
+  return BASE + '/storage/' + u;
+}
 function videoToItem(v, fallbackType) {
   const um = (v.url || '').match(/\/(tvshow|movie)\/([a-z0-9-]+)/i);
   const type = v.is_series ? 'series' : (um ? (um[1].toLowerCase() === 'movie' ? 'movie' : 'series') : fallbackType);
@@ -571,7 +604,7 @@ function videoToItem(v, fallbackType) {
   return {
     id: type + ':' + slug, type, slug,
     title: decodeEntities(v.title || ''),
-    poster: v.poster_url || v.poster || null,
+    poster: absPoster(v.poster_url || v.poster),
     year: v.year || undefined,
     description: decodeEntities(v.description || '') || undefined,
   };
@@ -621,7 +654,7 @@ async function searchCatalog(query) {
       type,
       slug,
       title: decodeEntities(v.title || v.name || ''),
-      poster: v.poster || v.cover || (v.poster_path ? 'https://image.tmdb.org/t/p/w500' + v.poster_path : null) || undefined,
+      poster: absPoster(v.poster || v.cover || (v.poster_path ? 'https://image.tmdb.org/t/p/w500' + v.poster_path : null)) || undefined,
       year: v.year || v.release_year || undefined,
       description: decodeEntities(v.description || ''),
     };
@@ -726,7 +759,31 @@ async function getEpisodeLink(episodeId) {
   };
 }
 
-module.exports = { BASE, getCatalog, searchCatalog, getSeriesMeta, getMovieMeta, getEpisodeLink, getHtml, getJson, decodeEntities };
+const CHUNK_PAGES = 30;
+async function getLastPages() {
+  await fetchPage('/mosalsalat', 1);
+  await fetchPage('/aflam', 1);
+  return { series: _lastPage.get('/mosalsalat') || 1, movie: _lastPage.get('/aflam') || 1 };
+}
+async function getCatalogChunk(type, chunk) {
+  const t = type === 'movie' ? 'movie' : 'series';
+  const ep = LIST_ENDPOINT[t];
+  const lp = (await getLastPages())[t];
+  const start = chunk * CHUNK_PAGES + 1;
+  const end = Math.min(lp, (chunk + 1) * CHUNK_PAGES);
+  if (start > lp) return [];
+  const pages = [];
+  for (let p = start; p <= end; p++) pages.push(p);
+  for (let i = 0; i < pages.length; i += 10) {
+    await Promise.all(pages.slice(i, i + 10).map((p) => fetchPage(ep, p)));
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  const items = [];
+  for (let p = start; p <= end; p++) for (const v of (pageCacheGet(ep, p) || [])) items.push(videoToItem(v, t));
+  return items;
+}
+
+module.exports = { BASE, getCatalog, searchCatalog, getSeriesMeta, getMovieMeta, getEpisodeLink, getHtml, getJson, decodeEntities, getLastPages, getCatalogChunk, CHUNK_PAGES, absPoster };
 
   },
   "lib/resolver.js": function (module, exports, __req) {
