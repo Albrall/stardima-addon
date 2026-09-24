@@ -201,15 +201,31 @@ async function handleRequest(url, req, ctx) {
   if (path === '/manifest.json' || path === '/manifest') return json(buildManifest(url));
   if (path === '/' || path === '/configure') {
     return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>${NAME} Add-on</title></head>
-<body style="font-family:system-ui,-apple-system,sans-serif;background:#0b1020;color:#e8ecf5;margin:0;padding:32px">
-<div style="max-width:640px;margin:0 auto;background:#141b33;border:1px solid #24305a;border-radius:16px;padding:24px">
-<h1 style="margin:0 0 6px;font-size:22px">🎬 ${NAME} — ستارديما (مرتب أ-ي)</h1>
-<p style="opacity:.75;margin:0 0 18px">مكتبة كاملة مرتبة أبجديًا + بحث + حلقات + بث مباشر</p>
-<p>رابط الأدئون (Stremio / Nuvio):</p>
-<input readonly value="${url.origin}/manifest.json" onclick="this.select()"
-  style="width:100%;padding:12px;border-radius:10px;border:1px solid #2c3a6b;background:#0d1428;color:#e8ecf5;box-sizing:border-box">
-<a href="${url.origin}/manifest.json" style="display:inline-block;margin-top:14px;padding:10px 16px;background:#3b82f6;color:#fff;border-radius:10px;text-decoration:none">افتح الـ manifest</a>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${NAME} — ستارديما (أ-ي)</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;background:#0b1020;color:#e8ecf5;margin:0;padding:22px;line-height:1.7}
+.card{max-width:640px;margin:0 auto;background:#141b33;border:1px solid #24305a;border-radius:16px;padding:22px}
+input{width:100%;padding:12px;border-radius:10px;border:1px solid #2c3a6b;background:#0d1428;color:#e8ecf5;box-sizing:border-box;direction:ltr;font-size:13px}
+button,.btn{display:inline-block;margin:12px 6px 0 0;padding:12px 18px;background:#3b82f6;color:#fff;border:0;border-radius:10px;text-decoration:none;font-size:15px;cursor:pointer}
+.btn.s2{background:#1f2a4d;border:1px solid #34406e}
+.ok{color:#4ade80;margin-inline-start:10px;font-size:14px}
+ol,ul{padding-inline-start:20px;opacity:.92}
+hr{border:0;border-top:1px solid #24305a;margin:20px 0}
+small{opacity:.6}</style></head><body><div class="card">
+<h1 style="margin:0 0 6px;font-size:21px">🎬 ستارديما — مرتب أ-ي</h1>
+<p style="opacity:.8;margin:0 0 16px">2257 مسلسل · 1597 فيلم · حلقات · بحث · بث مباشر</p>
+<p style="margin:0 0 6px">رابط الأدئون (الصقه في Nuvio أو Stremio):</p>
+<input id="u" readonly value="${url.origin}/manifest.json" onclick="this.select()">
+<div><button onclick="cp()">📋 نسخ الرابط</button><span id="m" class="ok"></span>
+<a class="btn s2" href="stremio://${url.host}/manifest.json">▶ Stremio</a></div>
+<hr>
+<p style="margin:0;font-weight:600">Nuvio (آيباد/جوال):</p>
+<ol><li>الإعدادات ← الأدئونات / Add-ons</li><li>«إضافة أدئون» ثم لصق الرابط</li><li>ارجع للمكتبة ← مسلسلات / أفلام</li></ol>
+<p style="margin:0;font-weight:600">Stremio:</p>
+<ol><li>Addons ← Install from URL ← الصق الرابط</li></ol>
+<hr><small>يعمل مباشرة بدون حساب. الحلقات تُحل عند الضغط على «تشغيل».</small>
+<script>function cp(){var i=document.getElementById('u');i.select();i.setSelectionRange(0,999);
+try{navigator.clipboard.writeText(i.value);}catch(e){document.execCommand('copy');}
+document.getElementById('m').textContent='تم النسخ ✓';setTimeout(function(){document.getElementById('m').textContent='';},2000);}</script>
 </div></body></html>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS } });
   }
 
@@ -231,7 +247,15 @@ async function handleRequest(url, req, ctx) {
     if (type !== 'series' && type !== 'movie') return notFound();
 
     if (extras.search) {
-      const res = await searchCatalog(extras.search);
+      const q = extras.search.trim();
+      const sc = 'search:' + q;
+      let hitS = _cache.get(sc);
+      if (!hitS || Date.now() - hitS.t > 10 * 60 * 1000) {
+        const v = await searchCatalog(q);
+        hitS = { t: Date.now(), v };
+        _cache.set(sc, hitS); // shared across catalog types and users
+      }
+      const res = hitS.v;
       const metas = res.filter(x => (x.type || 'series') === type)
         .sort((a, b) => byTitleAr(a.title, b.title))
         .map(x => ({
