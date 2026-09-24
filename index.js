@@ -387,16 +387,52 @@ server.listen(PORT, '0.0.0.0', () => {
 // site's own frontend (Laravel + Inertia).
 
 const BASE = process.env.STARDIMA_BASE || 'https://stardima-s7.cartoon.com.im';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-const AJAX = { 'User-Agent': UA, 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'Referer': BASE + '/' };
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+// Full browser-like header sets. Cloudflare/front-ends often 403 requests from
+// datacenter IPs (Render etc.) that look like bots; a complete, realistic header
+// set is the first line of defence.
+function htmlHeaders(referer) {
+  return {
+    'User-Agent': UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': referer ? 'same-origin' : 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    ...(referer ? { 'Referer': referer } : { 'Referer': BASE + '/' }),
+  };
+}
+function ajaxHeaders(referer) {
+  return {
+    'User-Agent': UA,
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
+    'Referer': referer || BASE + '/',
+  };
+}
 
 async function getJson(path, referer) {
-  const res = await fetch(BASE + path, { headers: { ...AJAX, ...(referer ? { Referer: referer } : {}) } });
+  const res = await fetch(BASE + path, { headers: ajaxHeaders(referer) });
   if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + path);
   return res.json();
 }
 async function getHtml(path, referer) {
-  const res = await fetch(BASE + path, { headers: { 'User-Agent': UA, 'Accept': 'text/html', ...(referer ? { Referer: referer } : {}) } });
+  const res = await fetch(BASE + path, { headers: htmlHeaders(referer) });
   if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + path);
   return res.text();
 }
