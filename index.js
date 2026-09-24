@@ -123,7 +123,7 @@ async function handleCatalog(req, res, type, id, query) {
   const cached = cacheGet(cacheKey, 10 * 60 * 1000);
   if (cached) return sendJson(res, 200, cached);
   try {
-    const items = await stardima.getCatalog({ search, type, skip, limit: 250 });
+    const items = await stardima.getCatalog({ search, type, skip, limit: 5000 });
     const metas = items.map((it) => ({
       id: 'stardima:' + it.slug,
       type,
@@ -533,6 +533,36 @@ function pageCacheGet(ep, p) {
   return null;
 }
 function pageCacheSet(ep, p, v) { _pageCache.set(ep + ':' + p, { v, t: Date.now() }); }
+const _lastPage = new Map();
+
+async function fetchPage(ep, p) {
+  let vids = pageCacheGet(ep, p);
+  if (vids) return vids;
+  try {
+    const data = await getJson(ep + '?page=' + p, BASE + ep);
+    vids = (data && data.videos) || [];
+    if (data && data.pagination && data.pagination.last_page) _lastPage.set(ep, data.pagination.last_page);
+    pageCacheSet(ep, p, vids);
+  } catch (e) { vids = []; }
+  return vids;
+}
+
+// Fetch EVERY page of a listing (chunked concurrency) -> full library list.
+async function getFull(ep, t) {
+  await fetchPage(ep, 1);
+  const last = _lastPage.get(ep) || 1;
+  const pages = [];
+  for (let p = 2; p <= last; p++) pages.push(p);
+  for (let i = 0; i < pages.length; i += 20) {
+    const chunk = pages.slice(i, i + 20);
+    await Promise.all(chunk.map((p) => fetchPage(ep, p)));
+  }
+  const items = [];
+  for (let p = 1; p <= last; p++) {
+    for (const v of (pageCacheGet(ep, p) || [])) items.push(videoToItem(v, t));
+  }
+  return items;
+}
 
 function videoToItem(v, fallbackType) {
   const um = (v.url || '').match(/\/(tvshow|movie)\/([a-z0-9-]+)/i);
@@ -553,6 +583,10 @@ async function getCatalog({ search, type, skip, limit } = {}) {
   const ep = LIST_ENDPOINT[t];
   skip = parseInt(skip || 0, 10) || 0;
   limit = parseInt(limit || 50, 10) || 50;
+  if (limit >= 1000) {
+    const all = await getFull(ep, t);
+    return all.slice(skip, skip + limit);
+  }
   const firstPage = Math.floor(skip / PAGE_SIZE) + 1;
   const lastPage = Math.floor((skip + limit - 1) / PAGE_SIZE) + 1;
   const startGlobal = (firstPage - 1) * PAGE_SIZE;
