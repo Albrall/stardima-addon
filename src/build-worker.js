@@ -21,9 +21,10 @@ function rewrite(code, fromId) {
 
 // worker-router.js contains `const INDEX = /*__INDEX__*/{};` — inject the real index
 const idx = JSON.parse(fs.readFileSync(path.join(ROOT, 'catalog-index.min.json'), 'utf8'));
-let genres = null;
+let genres = null, ourGenres = null;
 try { genres = JSON.parse(fs.readFileSync(path.join(ROOT, 'genres.json'), 'utf8')); } catch (e) { /* optional */ }
-const indexLiteral = JSON.stringify({ built: idx.built, series: idx.series, movies: idx.movies, genres: genres && { labels: genres.labels, items: genres.items } });
+try { ourGenres = JSON.parse(fs.readFileSync(path.join(ROOT, 'our-genres.json'), 'utf8')); } catch (e) { /* optional */ }
+const indexLiteral = JSON.stringify({ built: idx.built, series: idx.series, movies: idx.movies, genres: genres && { labels: genres.labels, items: genres.items }, ourGenres: ourGenres && { labels: ourGenres.labels, items: ourGenres.items } });
 function prep(f) {
   let code = fs.readFileSync(path.join(ROOT, f), 'utf8');
   if (f === 'worker-router.js') {

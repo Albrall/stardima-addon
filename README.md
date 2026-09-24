@@ -40,10 +40,28 @@ alphabetical position automatically.
 
 ## Genres
 
-The site exposes 36 categories (`/mosalsalat?category=<slug>`, `/afam?...`). `build-genres.js`
-walks every category page (~133 pages) and stores slug → category indices, so genre
-filtering is instant and offline. Exposed as the `genre` extra on both browse catalogs
-and as `meta.genres` per title.
+Two layers, merged into a single 59-entry filter:
+
+1. **The site's own categories** — `build-genres.js` walks every category page
+   (~133 pages) and stores slug → category indices. 36 categories, instant and offline,
+   including hand-curated collections (Ben 10, MBC3, أفلام كونان, دورايمون, هاري بوتر…).
+2. **Our derived tags** — `build-ours.js` fetches the whole library (title + Arabic
+   synopsis + year) and classifies it with a weighted Arabic lexicon (word-exact and
+   stem matching, definite-article aware), boosted by the site's curated collections.
+   22 semantic genres + 2 date tags:
+
+   `أكشن مغامرة كوميدي دراما خيال علمي فانتازيا غموض وتحقيق رعب رياضة مدرسي موسيقي
+   طبخ حيوانات فضاء روبوتات قراصنة نينجا وساموراي سيارات ديني وإسلامي رومانسي تاريخي
+   بنات السحر` + `كلاسيكي (قبل 2000)` + `جديد (2020+)`
+
+Where a name exists in both layers (e.g. `أكشن`) one option matches the **union** of both,
+so nothing is lost. `meta.genres` per title returns ours first, then theirs.
+
+Honest quality of the derived tags (measured, not claimed): covers **73%** of the 3854
+titles; against the site's hand-curated collections it recalls 100% of `أكشن`, `نينجا`
+and `كرتون إسلامي`. It is a heuristic, so tag the exceptions as expected: titles with no
+synopsis keyword (e.g. some raw romanised rows) can end up untagged, and a few titles
+land in a neighbouring genre. `our-genres-report.txt` holds samples per genre.
 
 ## Alerts
 
@@ -69,6 +87,7 @@ src/
   lib/unpacker.js      eval-free p.a.c.k.e.r. decoder (Workers forbid eval)
   build-index.js       fetches every listing page -> catalog-index.json (+ compact copy)
   build-genres.js      walks every category page -> genres.json (slug -> categories)
+  build-ours.js        classifies the library -> our-genres.json (our semantic genres)
   build-worker.js      bundles src -> ../worker-addon.js and injects the index
   build-bundle.js      bundles src -> ../index.js (single-file Node server)
 worker-addon.js        generated Worker module (what is deployed)

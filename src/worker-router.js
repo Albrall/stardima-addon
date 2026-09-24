@@ -122,25 +122,63 @@ async function episodeIdFor(type, id) {
 }
 
 
-// ---- genres (site categories, embedded at build time) --------------------
-function genreLabels() { return (((INDEX.genres || {}).labels) || []); }
-function genreOptions() { return genreLabels().map(([, label]) => label); }
-function genreSlugsOf(slug) {
-  const raw = (((INDEX.genres || {}).items) || {})[slug];
-  if (!raw) return [];
-  return String(raw).split(',').map((n) => (genreLabels()[parseInt(n, 10)] || [])[1]).filter(Boolean);
+// ---- genres: the site's categories + OUR derived tags --------------------
+// Our tags come from build-ours.js (Arabic title + synopsis + year + the site's
+// hand-curated collections). Options are merged by normalised label: where our
+// tag and a site category share a name (e.g. 'أكشن'), one option matches BOTH.
+function siteGenreLabels() { return (((INDEX.genres || {}).labels) || []); }
+function ourGenreLabels() { return (((INDEX.ourGenres || {}).labels) || []); }
+
+let _gmap = null;
+function genreMap() {
+  if (_gmap) return _gmap;
+  const ours = ourGenreLabels(), site = siteGenreLabels();
+  const options = [], sources = {}, usedSite = new Set();
+  for (let i = 0; i < ours.length; i++) {
+    const label = ours[i], n = normTitle(label);
+    const list = [{ kind: 'our', i }];
+    for (let j = 0; j < site.length; j++) {
+      if (normTitle(site[j][1]) === n) { list.push({ kind: 'site', i: j }); usedSite.add(j); }
+    }
+    options.push(label); sources[label] = list;
+  }
+  for (let j = 0; j < site.length; j++) {
+    if (usedSite.has(j)) continue;
+    const label = site[j][1];
+    if (options.indexOf(label) >= 0) continue;
+    options.push(label); sources[label] = [{ kind: 'site', i: j }];
+  }
+  _gmap = { options, sources };
+  return _gmap;
+}
+function genreOptions() { return genreMap().options; }
+
+function genreBreakdown(slug) {
+  const out = [];
+  const seen = new Set();
+  const add = (l) => { const n = normTitle(l); if (l && !seen.has(n)) { seen.add(n); out.push(l); } };
+  const ourIdx = (((INDEX.ourGenres || {}).items) || {})[slug];
+  if (ourIdx) for (const n of String(ourIdx).split(',')) add(ourGenreLabels()[+n]);
+  const siteIdx = (((INDEX.genres || {}).items) || {})[slug];
+  if (siteIdx) for (const n of String(siteIdx).split(',')) add((siteGenreLabels()[+n] || [])[1]);
+  return out;
 }
 function genreMatches(slug, wanted) {
   const w = String(wanted || '').trim();
   if (!w) return true;
-  const nw = normTitle(w); // 'أنمي' must match the site's 'انمي'
-  const labels = genreLabels();
-  let gi = labels.findIndex(([sl, lb]) => lb === w || sl === w || normTitle(lb) === nw);
-  if (gi < 0) gi = labels.findIndex(([sl, lb]) => normTitle(lb).indexOf(nw) >= 0); // 'أفلام دورايمون' ⊂ 'أفلام دورايمون - Doraemon Movie'
-  if (gi < 0) return false;
-  const raw = (((INDEX.genres || {}).items) || {})[slug];
-  if (!raw) return false;
-  return (',' + raw + ',').indexOf(',' + gi + ',') >= 0;
+  const gm = genreMap();
+  const nw = normTitle(w);
+  let label = gm.options.indexOf(w) >= 0 ? w
+    : gm.options.find((o) => normTitle(o) === nw)
+    || gm.options.find((o) => normTitle(o).indexOf(nw) >= 0);
+  if (!label) return false;
+  for (const src of (gm.sources[label] || [])) {
+    const table = src.kind === 'our' ? (INDEX.ourGenres || {}) : (INDEX.genres || {});
+    const raw = (table.items || {})[slug];
+    if (!raw) continue;
+    if ((',' + String(raw) + ',').indexOf(',' + src.i + ',') >= 0) return true;
+  }
+  return false;
 }
 
 // ---- alphabetical catalog (embedded index + live newest pages) ------------
@@ -506,7 +544,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const meta = type === 'series' ? await getSeriesMeta(slug) : type === 'movie' ? await getMovieMeta(slug) : null;
     if (!meta) return notFound();
     meta.id = 'stardima:' + slug;
-    const gs = genreSlugsOf(slug); if (gs.length) meta.genres = gs;
+    const gs = genreBreakdown(slug); if (gs.length) meta.genres = gs;
     let out;
     if (type === 'movie') {
       out = { meta: { ...meta, videos: undefined } };
