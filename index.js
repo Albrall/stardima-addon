@@ -123,7 +123,7 @@ async function handleCatalog(req, res, type, id, query) {
   const cached = cacheGet(cacheKey, 10 * 60 * 1000);
   if (cached) return sendJson(res, 200, cached);
   try {
-    const items = await stardima.getCatalog({ search, type, skip, limit: 50 });
+    const items = await stardima.getCatalog({ search, type, skip, limit: 250 });
     const metas = items.map((it) => ({
       id: 'stardima:' + it.slug,
       type,
@@ -555,9 +555,10 @@ async function getCatalog({ search, type, skip, limit } = {}) {
   limit = parseInt(limit || 50, 10) || 50;
   const firstPage = Math.floor(skip / PAGE_SIZE) + 1;
   const lastPage = Math.floor((skip + limit - 1) / PAGE_SIZE) + 1;
-  const concat = [];
-  let startGlobal = (firstPage - 1) * PAGE_SIZE;
-  for (let p = firstPage; p <= lastPage; p++) {
+  const startGlobal = (firstPage - 1) * PAGE_SIZE;
+  const pageNos = [];
+  for (let p = firstPage; p <= lastPage; p++) pageNos.push(p);
+  const results = await Promise.all(pageNos.map(async (p) => {
     let vids = pageCacheGet(ep, p);
     if (!vids) {
       try {
@@ -566,9 +567,10 @@ async function getCatalog({ search, type, skip, limit } = {}) {
         pageCacheSet(ep, p, vids);
       } catch (e) { vids = []; }
     }
-    if (!vids.length) break;
-    for (const v of vids) concat.push(videoToItem(v, t));
-  }
+    return vids;
+  }));
+  const concat = [];
+  for (const vids of results) for (const v of vids) concat.push(videoToItem(v, t));
   return concat.slice(skip - startGlobal, skip - startGlobal + limit);
 }
 
