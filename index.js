@@ -197,34 +197,34 @@ async function handleStream(req, res, type, id) {
   // For series: id = stardima:{slug}:{episodeId}
   // For movie:  id = stardima:{slug}  -> need to look up its episode id
   let episodeId = null;
+  let movieSlug = null;
   const parts = id.split(':');
-  if (type === 'series' && parts.length >= 3) {
+  if (type === 'series' && parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1])) {
     episodeId = parts[parts.length - 1];
   } else if (type === 'movie') {
-    const slug = id.replace(/^stardima:/, '');
-    const cacheKey = `movieep:${slug}`;
-    let cached = cacheGet(cacheKey, 60 * 60 * 1000);
-    if (cached) episodeId = cached;
-    else {
-      const m = await stardima.getMovieMeta(slug);
-      episodeId = m.movieEpisodeId || null;
-      if (episodeId) cacheSet(cacheKey, episodeId);
-    }
-  } else if (type === 'series' && parts.length === 2) {
-    const slug = parts[1];
-    const m = await stardima.getSeriesMeta(slug);
-    if (m.videos && m.videos[0]) episodeId = m.videos[0].episodeId;
+    // Movies play through /play/<slug>, which embeds the hyperwatching iframe.
+    movieSlug = id.replace(/^stardima:/, '').split(':')[0];
+  } else if (type === 'series') {
+    const slug = parts[parts.length - 1];
+    try {
+      const m = await stardima.getSeriesMeta(slug);
+      if (m.videos && m.videos[0]) episodeId = m.videos[0].episodeId || String(m.videos[0].id).split(':').pop();
+    } catch (e) { /* none */ }
   }
 
-  if (!episodeId) return sendJson(res, 200, { streams: [] });
+  if (!episodeId && !movieSlug) return sendJson(res, 200, { streams: [] });
 
-  // Cache the SERVER LIST (stable per episode), not the m3u8 (short-lived).
-  const cacheKey = `servers:${episodeId}`;
+  // Cache the ORDERED SERVER LIST (stable), not the m3u8 (short-lived token).
+  const cacheKey = movieSlug ? `movieservers:${movieSlug}` : `servers:${episodeId}`;
   let result = cacheGet(cacheKey, 10 * 60 * 1000);
   if (!result) {
-    try { result = await resolver.getServers(episodeId); }
-    catch (e) { return sendJson(res, 200, { streams: [], error: e.message }); }
-    if (!result.blocked) cacheSet(cacheKey, result);
+    try {
+      result = movieSlug ? await resolver.getMovieServers(movieSlug) : await resolver.getServers(episodeId);
+    } catch (e) { return sendJson(res, 200, { streams: [], error: e.message }); }
+    if (!result.blocked) {
+      result = { ...result, servers: await resolver.orderServers(result.servers || [], { maxProbe: 3, probeMs: 7000 }) };
+      cacheSet(cacheKey, result);
+    }
   }
 
   if (result.blocked) {
@@ -602,6 +602,47 @@ async function getFull(ep, t) {
   return items;
 }
 
+const TMDB_W500 = 'https://image.tmdb.org/t/p/w500/';
+// Compact poster encoding for the embedded index:
+//   '@path' -> TMDB w500 image | '!url' -> other absolute url | 'path' -> BASE/storage/path
+function compactPoster(u) {
+  const abs = absPoster(u);
+  if (!abs) return '';
+  if (abs.indexOf(TMDB_W500) === 0) return '@' + abs.slice(TMDB_W500.length);
+  if (abs.indexOf(BASE + '/storage/') === 0) return abs.slice((BASE + '/storage/').length);
+  return '!' + abs;
+}
+function decodePoster(p) {
+  if (!p) return '';
+  if (p[0] === '@') return TMDB_W500 + p.slice(1);
+  if (p[0] === '!') return p.slice(1);
+  return BASE + '/storage/' + p;
+}
+// Arabic-aware title collation (Workers have limited ICU, so order is explicit).
+const AR_ORDER = 'ابتثجحخدذرزسشصضطظعغفقكلمنهوي';
+function normTitle(t) {
+  let x = t || '';
+  try { x = x.normalize('NFKC'); } catch (e) { /* no-op */ } // presentation forms -> base letters
+  return x
+    .replace(/[\u064B-\u0652\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي').replace(/ة/g, 'ه')
+    .toLowerCase().trim();
+}
+function arKey(t) {
+  const n = normTitle(t);
+  let out = '';
+  for (const ch of n) {
+    const i = AR_ORDER.indexOf(ch);
+    out += i >= 0 ? String.fromCharCode(0xe000 + i) : ch;
+  }
+  return out;
+}
+function byTitleAr(a, b) {
+  const ka = arKey(a), kb = arKey(b);
+  return ka < kb ? -1 : ka > kb ? 1 : 0;
+}
+
 function absPoster(u) {
   if (!u) return null;
   if (/^https?:/i.test(u)) return u;
@@ -655,22 +696,41 @@ async function getCatalog({ search, type, skip, limit } = {}) {
 
 // Search via the site's JSON search endpoint.
 async function searchCatalog(query) {
-  const data = await getJson('/search?query=' + encodeURIComponent(query));
-  const vids = (data && data.videos) || [];
-  return vids.map((v) => {
-    const um = (v.url || '').match(/\/(tvshow|movie)\/([a-z0-9-]+)/i);
-    const type = v.is_series === false || v.type === 'movie' ? 'movie' : (um ? (um[1].toLowerCase() === 'movie' ? 'movie' : 'series') : 'series');
-    const slug = um ? um[2] : (v.slug || String(v.id));
-    return {
-      id: type + ':' + slug,
-      type,
-      slug,
-      title: decodeEntities(v.title || v.name || ''),
+  const q = encodeURIComponent(query);
+  // The search endpoint is paginated (per_page ~12); walk every page so nothing
+  // is missed, then drop single-episode rows (/tvshow/<slug>/play/<id>).
+  const first = await getJson('/search?query=' + q);
+  const lastPage = Math.min(((first && first.pagination && first.pagination.last_page) || 1), 10);
+  let vids = ((first && first.videos) || []).slice();
+  for (let p = 2; p <= lastPage; p++) {
+    try {
+      const j = await getJson('/search?query=' + q + '&page=' + p);
+      const more = (j && j.videos) || [];
+      if (!more.length) break;
+      vids = vids.concat(more);
+    } catch (e) { break; }
+  }
+  const out = new Map();
+  for (const v of vids) {
+    const urlStr = v.url || '';
+    if (/\/play\//i.test(urlStr)) continue;            // episode row, not a title
+    const um = urlStr.match(/\/(tvshow|movie)\/([a-z0-9-]+)/i);
+    if (!um) continue;                                    // unopenable shape
+    const type = v.is_series === false || um[1].toLowerCase() === 'movie' ? 'movie' : 'series';
+    const slug = um[2];
+    const key = type + ':' + slug;
+    if (out.has(key)) continue;                           // dedupe across pages
+    const title = decodeEntities(v.title || v.name || '');
+    if (!title) continue;
+    out.set(key, {
+      id: key, type, slug,
+      title,
       poster: absPoster(v.poster_url || v.poster || v.cover || (v.poster_path ? 'https://image.tmdb.org/t/p/w500' + v.poster_path : null)) || undefined,
       year: v.year || v.release_year || undefined,
       description: decodeEntities(v.description || ''),
-    };
-  }).filter((x) => x.title);
+    });
+  }
+  return [...out.values()];
 }
 
 // ---- META (series) ----
@@ -743,7 +803,10 @@ async function getMovieMeta(slug) {
   const description = metaContent(html, 'og:description') || metaContent(html, 'description') || '';
   const poster = metaContent(html, 'og:image');
   // movie play link -> episode id
-  const playLink = html.match(/\/movie\/[a-z0-9-]+\/play\/(\d+)/i) || html.match(/\/play\/(\d+)/i);
+  // Movies play through /play/<slug> (an HTML page with the embed iframe), so a
+  // numeric play id only exists for the rare legacy layout. Require a boundary
+  // so '/play/6a5e8ef498a55' is not mistaken for episode id '6'.
+  const playLink = html.match(/\/play\/(\d+)(?![a-z0-9])/i);
   const epId = playLink ? playLink[1] : null;
   const meta = {
     id: 'movie:' + slug,
@@ -752,6 +815,7 @@ async function getMovieMeta(slug) {
     poster, background: poster, description, slug,
   };
   if (epId) meta.movieEpisodeId = epId;
+  meta.moviePlaySlug = slug; // resolver fetches /play/<slug> for the embed
   return meta;
 }
 
@@ -795,7 +859,7 @@ async function getCatalogChunk(type, chunk) {
   return items;
 }
 
-module.exports = { BASE, getCatalog, searchCatalog, getSeriesMeta, getMovieMeta, getEpisodeLink, getHtml, getJson, decodeEntities, getLastPages, getCatalogChunk, CHUNK_PAGES, absPoster };
+module.exports = { BASE, compactPoster, decodePoster, byTitleAr, arKey, normTitle, TMDB_W500, getCatalog, searchCatalog, getSeriesMeta, getMovieMeta, getEpisodeLink, getHtml, getJson, decodeEntities, getLastPages, getCatalogChunk, CHUNK_PAGES, absPoster };
 
   },
   "lib/resolver.js": function (module, exports, __req) {
@@ -888,7 +952,58 @@ async function getServers(episodeId) {
   return { blocked: false, servers, title: link.title, series: link.series };
 }
 
-module.exports = { resolveEpisode, getServers, getHyperwatchingServers, extractInertiaProps };
+
+// ---- MOVIE servers: /play/<slug> embeds the hyperwatching iframe directly ----
+async function getMovieServers(slug) {
+  const html = await stardima.getHtml('/play/' + slug, stardima.BASE + '/movie/' + slug);
+  const m = html.match(/https?:\/\/v\d+\.hyperwatching\.com\/watch\/[A-Za-z0-9_-]+/i)
+    || html.match(/<iframe[^>]+src="(https?:\/\/[^"]+\/watch\/[A-Za-z0-9_-]+)"/i);
+  const watchUrl = m ? (m[1] || m[0]) : null;
+  if (!watchUrl) return { blocked: false, servers: [], watch_url: null };
+  const servers = await getHyperwatchingServers(watchUrl);
+  return { blocked: false, servers, watch_url: watchUrl };
+}
+
+// Known-good host order: workers can reach uqload/mixdrop reliably, while
+// goodstream/savefiles/streamhg 404 and lulustream 403s from edge IPs.
+const HOST_PRIORITY = [
+  [/uqload/i, 0], [/mixdrop/i, 1], [/vidlo|videobin|vidbom|doodstream|streamsb|upstream/i, 2],
+  [/lulustream/i, 3], [/strema|goodstream/i, 4], [/savefiles/i, 5], [/hgcloud|streamhg/i, 6],
+];
+function hostRank(srv) {
+  const s = (srv && ((srv.name || '') + ' ' + (srv.embedUrl || ''))) || '';
+  for (const [re, r] of HOST_PRIORITY) if (re.test(s)) return r;
+  return 7;
+}
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('probe timeout')), ms)),
+  ]);
+}
+// Order servers so a WORKING one is first: rank by host, then health-probe the
+// top few in parallel (resolution is cheap; the player only fetches the winner).
+async function orderServers(servers, opts = {}) {
+  const list = (servers || []).slice();
+  const ranked = list.map((s) => ({ s, rank: hostRank(s) })).sort((a, b) => a.rank - b.rank || 0);
+  if (opts.probe === false) return ranked.map((x) => x.s);
+  const maxProbe = opts.maxProbe || 5;
+  const head = ranked.slice(0, maxProbe);
+  const rest = ranked.slice(maxProbe).map((x) => x.s);
+  const probed = await Promise.all(head.map(async ({ s }) => {
+    try {
+      const r = await withTimeout(resolveHost(s.embedUrl), opts.probeMs || 9000);
+      return { s, ok: !!(r && r.url) };
+    } catch (e) { return { s, ok: false }; }
+  }));
+  return [
+    ...probed.filter((x) => x.ok).map((x) => x.s),
+    ...probed.filter((x) => !x.ok).map((x) => x.s),
+    ...rest,
+  ];
+}
+
+module.exports = { resolveEpisode, getServers, getMovieServers, orderServers, hostRank, getHyperwatchingServers, extractInertiaProps };
 
   },
   "lib/hosts.js": function (module, exports, __req) {

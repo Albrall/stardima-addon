@@ -1,0 +1,390 @@
+/* Stardima Add-on — Cloudflare Worker bundle (self-contained, no deps)
+ * Catalogs are served from an embedded, alphabetically-sorted index (built by
+ * build-index.js) merged with a live fetch of the newest listing pages, so new
+ * releases appear in their correct alphabetical position within ~15 minutes. */
+const {
+  BASE, getJson, videoToItem, getSeriesMeta, getMovieMeta, getEpisodeLink,
+  searchCatalog, compactPoster, decodePoster, byTitleAr,
+} = require('./lib/stardima');
+const { getServers, getMovieServers, orderServers } = require('./lib/resolver');
+const { resolveHost, UA } = require('./lib/hosts');
+
+const NAME = 'Stardima';
+const VERSION = '3.0.0';
+const ID = 'community.stardima';
+const CHUNK_SIZE = 450; // items per catalog (Nuvio loads one catalog in one go)
+
+// Replaced at build time by build-worker.js with catalog-index.min.json
+const INDEX = /*__INDEX__*/{};
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
+// ---- helpers --------------------------------------------------------------
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=300', ...CORS_HEADERS },
+  });
+}
+function notFound() { return json({ metas: [], meta: null, streams: [] }, 404); }
+function slugFromUrl(url) {
+  if (!url) return '';
+  const p = String(url).split('/').filter(Boolean);
+  return p[p.length - 1] || '';
+}
+function keyOf(id) { return /^stardima-m/.test(id || '') ? 'movies' : 'series'; }
+function epOfKey(key) { return key === 'movies' ? 'aflam' : 'mosalsalat'; }
+function chunkOf(id) { const m = /(\d+)$/.exec(id || ''); return m ? parseInt(m[1], 10) : 1; }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Worker-safe base64url (no Buffer in Workers)
+function b64url(str) {
+  const bytes = new TextEncoder().encode(str || '');
+  let bin = ''; for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function unb64url(str) {
+  const b = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b + '='.repeat((4 - (b.length % 4)) % 4));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+async function fetchT(target, opts, ms) {
+  try { return await fetch(target, { ...opts, signal: AbortSignal.timeout(ms || 15000) }); }
+  catch (e) { throw e; }
+}
+function proxiedRaw(origin, targetUrl, referer) {
+  return `${origin}/proxy?u=${b64url(targetUrl)}&r=${b64url(referer || '')}`;
+}
+// Rewrite an m3u8 playlist so every URI routes back through this Worker.
+function rewriteM3u8(playlistText, playlistUrl, referer, origin) {
+  const lines = String(playlistText).split(/\r?\n/);
+  const out = [];
+  for (let line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) { out.push(line); continue; }
+    if (trimmed.startsWith('#')) {
+      out.push(line.replace(/URI="([^"]+)"/g, (m, uri) => `URI="${proxiedRaw(origin, new URL(uri, playlistUrl).href, referer)}"`));
+      continue;
+    }
+    out.push(proxiedRaw(origin, new URL(trimmed, playlistUrl).href, referer));
+  }
+  return out.join('\n');
+}
+function playlistResponse(text) {
+  return new Response(text, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store', ...CORS_HEADERS } });
+}
+function textResponse(t, status) {
+  return new Response(t, { status: status || 200, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...CORS_HEADERS } });
+}
+function passthrough(up, req) {
+  const h = new Headers();
+  ['content-type', 'content-length', 'accept-ranges', 'content-range'].forEach((k) => { const v = up.headers.get(k); if (v) h.set(k, v); });
+  h.set('Access-Control-Allow-Origin', '*');
+  h.set('Cache-Control', 'no-store');
+  return new Response(up.body, { status: up.status, headers: h });
+}
+// episodeId from a Stremio id: 'series:<slug>:<epId>' | '<slug>:<epId>' | '<slug>'
+async function episodeIdFor(type, id) {
+  const parts = String(id || '').split(':');
+  if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1])) return parts[parts.length - 1];
+  const slug = parts[parts.length - 1];
+  if (!slug) return null;
+  try {
+    if (type === 'movie') {
+      const m = await getMovieMeta(slug);
+      return (m && m.movieEpisodeId) || null;
+    }
+    const m = await getSeriesMeta(slug);
+    const v = (m && m.videos) || [];
+    if (!v.length) return null;
+    return v[0].episodeId || String(v[0].id).split(':').pop();
+  } catch (e) { return null; }
+}
+
+
+// ---- alphabetical catalog (embedded index + live newest pages) ------------
+const _cache = new Map();
+const FRESH_TTL = 15 * 60 * 1000; // 15 min
+
+async function fetchNewest(ep) {
+  const hit = _cache.get('fresh:' + ep);
+  if (hit && Date.now() - hit.t < FRESH_TTL) return hit.v;
+  const out = [];
+  for (const p of [1, 2, 3]) {
+    try {
+      const j = await getJson(`${BASE}/${ep}?page=${p}`);
+      (j.videos || []).forEach(v => {
+        const slug = slugFromUrl(v.url);
+        if (slug) out.push([slug, (v.title || '').trim(), compactPoster(v.poster_url || v.poster), String(v.year || '')]);
+      });
+    } catch (e) { /* keep whatever we got */ }
+    await sleep(80);
+  }
+  if (out.length) _cache.set('fresh:' + ep, { t: Date.now(), v: out });
+  return out.length ? out : (hit ? hit.v : []);
+}
+
+async function sortedItems(key) {
+  const ck = 'sorted:' + key;
+  const hit = _cache.get(ck);
+  if (hit && Date.now() - hit.t < FRESH_TTL) return hit.v;
+  const base = ((INDEX[key] || {}).items) || [];
+  const map = new Map();
+  for (const it of base) map.set(it[0], it);
+  for (const it of await fetchNewest(epOfKey(key))) map.set(it[0], it); // newest wins
+  const arr = [...map.values()].sort((a, b) => byTitleAr(a[1], b[1]));
+  _cache.set(ck, { t: Date.now(), v: arr });
+  return arr;
+}
+
+function chunkCount(key) {
+  const n = (((INDEX[key] || {}).items) || []).length;
+  return Math.max(1, Math.ceil(n / CHUNK_SIZE));
+}
+
+// ---- manifest -------------------------------------------------------------
+function buildManifest() {
+  const arabicNum = (n) => String(n).replace(/\d/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
+  const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
+  const series = [], movies = [];
+  for (let c = 1; c <= sChunks; c++) series.push({
+    id: 'stardima-s' + c, type: 'series',
+    name: c === 1 ? `${NAME}: مسلسلات` : `${NAME}: مسلسلات (${arabicNum(c)})`,
+    extra: [{ name: 'search', isRequired: false }],
+  });
+  for (let c = 1; c <= mChunks; c++) movies.push({
+    id: 'stardima-m' + c, type: 'movie',
+    name: c === 1 ? `${NAME}: أفلام` : `${NAME}: أفلام (${arabicNum(c)})`,
+    extra: [{ name: 'search', isRequired: false }],
+  });
+  return {
+    id: ID, version: VERSION, name: `${NAME} — ستارديما (أ-ي)`,
+    description: 'مكتبة ستارديما كاملة مرتبة أبجديًا: ' +
+      ((((INDEX.series || {}).items) || []).length) + ' مسلسل و' +
+      ((((INDEX.movies || {}).items) || []).length) + ' فيلم، مع حلقات مترجمة وبث مباشر',
+    resources: ['catalog', 'meta', 'stream'], types: ['series', 'movie'],
+    idPrefixes: ['stardima:'], catalogs: [...series, ...movies],
+    behaviorHints: { configurableFor: false, configurationRequired: false },
+  };
+}
+
+// ---- routes ---------------------------------------------------------------
+async function handleRequest(url, req) {
+  let path = url.pathname;
+  if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
+  if (path.endsWith('.json')) path = path.slice(0, -5);
+
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+  if (path === '/manifest.json' || path === '/manifest') return json(buildManifest());
+  if (path === '/' || path === '/configure') {
+    return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${NAME} Add-on</title></head>
+<body style="font-family:system-ui,-apple-system,sans-serif;background:#0b1020;color:#e8ecf5;margin:0;padding:32px">
+<div style="max-width:640px;margin:0 auto;background:#141b33;border:1px solid #24305a;border-radius:16px;padding:24px">
+<h1 style="margin:0 0 6px;font-size:22px">🎬 ${NAME} — ستارديما (مرتب أ-ي)</h1>
+<p style="opacity:.75;margin:0 0 18px">مكتبة كاملة مرتبة أبجديًا + بحث + حلقات + بث مباشر</p>
+<p>رابط الأدئون (Stremio / Nuvio):</p>
+<input readonly value="${url.origin}/manifest.json" onclick="this.select()"
+  style="width:100%;padding:12px;border-radius:10px;border:1px solid #2c3a6b;background:#0d1428;color:#e8ecf5;box-sizing:border-box">
+<a href="${url.origin}/manifest.json" style="display:inline-block;margin-top:14px;padding:10px 16px;background:#3b82f6;color:#fff;border-radius:10px;text-decoration:none">افتح الـ manifest</a>
+</div></body></html>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS } });
+  }
+
+  // /catalog/{type}/{id}[/extras].json — Stremio puts extras in the path segment
+  if (path.startsWith('/catalog/')) {
+    const m = /^\/catalog\/([^/]+)\/([^/]+)(?:\/([^/]+))?$/.exec(path);
+    if (!m) return notFound();
+    const type = m[1], id = m[2];
+    const extras = {};
+    for (const src of [m[3], url.search.slice(1)]) {
+      if (!src) continue;
+      for (const kv of src.split('&')) {
+        if (!kv) continue;
+        const i = kv.indexOf('=');
+        if (i < 0) continue;
+        try { extras[decodeURIComponent(kv.slice(0, i))] = decodeURIComponent(kv.slice(i + 1).replace(/\+/g, ' ')); } catch (e) { /* skip */ }
+      }
+    }
+    if (type !== 'series' && type !== 'movie') return notFound();
+
+    if (extras.search) {
+      const res = await searchCatalog(extras.search);
+      const metas = res.filter(x => (x.type || 'series') === type)
+        .sort((a, b) => byTitleAr(a.title, b.title))
+        .map(x => ({
+          id: 'stardima:' + (x.slug || x.id), type, name: x.title,
+          poster: x.poster || undefined, releaseInfo: x.year ? String(x.year) : undefined,
+        }));
+      return json({ metas });
+    }
+
+    const sorted = await sortedItems(keyOf(id));
+    const total = sorted.length;
+    const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
+    const c = Math.min(Math.max(1, chunkOf(id)), chunks);
+    const start = (c - 1) * CHUNK_SIZE;
+    const end = c === chunks ? total : Math.min(start + CHUNK_SIZE, total); // last chunk uncapped
+    return json({
+      metas: sorted.slice(start, end).map(it => ({
+        id: 'stardima:' + it[0], type, name: it[1],
+        poster: decodePoster(it[2]) || undefined,
+        releaseInfo: it[3] || undefined,
+      })),
+    });
+  }
+
+  // /meta/{type}/{id}.json  (id = stardima:{slug})
+  if (path.startsWith('/meta/')) {
+    const m = /^\/meta\/([^/]+)\/([^/]+)$/.exec(path);
+    if (!m) return notFound();
+    const type = m[1];
+    const slug = decodeURIComponent(m[2]).replace(/^stardima:/, '').split(':')[0];
+    const ck = 'meta:' + type + ':' + slug;
+    const hit = _cache.get(ck);
+    if (hit && Date.now() - hit.t < 30 * 60 * 1000) return json(hit.v);
+    const meta = type === 'series' ? await getSeriesMeta(slug) : type === 'movie' ? await getMovieMeta(slug) : null;
+    if (!meta) return notFound();
+    meta.id = 'stardima:' + slug;
+    let out;
+    if (type === 'movie') {
+      out = { meta: { ...meta, videos: undefined } };
+    } else {
+      meta.videos = (meta.videos || []).map((v) => ({
+        ...v,
+        id: 'stardima:' + slug + ':' + (v.episodeId || String(v.id || '').split(':').pop()),
+      }));
+      out = { meta };
+    }
+    _cache.set(ck, { t: Date.now(), v: out });
+    return json(out);
+  }
+
+  // /stream/{type}/{id}.json — servers health-ordered, resolved lazily at playback
+  if (path.startsWith('/stream/')) {
+    const m = /^\/stream\/([^/]+)\/([^/]+)$/.exec(path);
+    if (!m) return notFound();
+    const type = m[1];
+    const raw = decodeURIComponent(m[2]).replace(/^stardima:/, '');
+    if (type !== 'series' && type !== 'movie') return notFound();
+    const parts = raw.split(':');
+    const epId = parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1]) ? parts[parts.length - 1] : null;
+    const slug = parts[parts.length - 1];
+    if (!epId && !slug) return json({ streams: [] });
+
+    // Series with no episode chosen: fall back to the first one.
+    let useEpId = epId;
+    if (!useEpId && type === 'series') {
+      try {
+        const mm = await getSeriesMeta(slug);
+        const v = (mm && mm.videos) || [];
+        if (v.length) useEpId = v[0].episodeId || String(v[0].id).split(':').pop();
+      } catch (e) { /* none */ }
+    }
+    if (type === 'series' && !useEpId) return json({ streams: [] });
+
+    const ck = (useEpId ? 'servers:' + useEpId : 'movieServers:' + slug);
+    let ordered = null;
+    const hit = _cache.get(ck);
+    if (hit && Date.now() - hit.t < 10 * 60 * 1000) ordered = hit.v;
+    if (!ordered) {
+      let result;
+      try { result = useEpId ? await getServers(useEpId) : await getMovieServers(slug); }
+      catch (e) { return json({ streams: [] }); }
+      if (!result) return json({ streams: [] });
+      if (result.blocked) {
+        const msg = result.reason === 'login_required' ? 'يتطلب تسجيل الدخول' : 'يتطلب عضوية VIP';
+        return json({ streams: [{ name: NAME, title: msg, externalUrl: BASE + '/membership' }] });
+      }
+      // Working server first: rank by host reachability, then health-probe.
+      ordered = await orderServers(result.servers || [], { maxProbe: 3, probeMs: 7000 });
+      if (ordered.length) _cache.set(ck, { t: Date.now(), v: ordered });
+    }
+    const origin = url.origin;
+    return json({
+      streams: (ordered || []).map((srv) => ({
+        name: `${NAME} · ${srv.name}`,
+        title: `${srv.name}${srv.is_vip ? ' (VIP)' : ''}`,
+        url: `${origin}/proxy/embed?u=${b64url(srv.embedUrl)}&n=${b64url(srv.name || '')}`,
+        behaviorHints: { notWebReady: true, bingeGroup: srv.name },
+      })),
+    });
+  }
+
+  // /proxy/embed?u=<b64url embed> — resolve the host embed FRESH at playback time
+  if (path === '/proxy/embed') {
+    const embedUrl = unb64url(url.searchParams.get('u') || '');
+    if (!embedUrl) return textResponse('missing embed', 400);
+    const origin = url.origin;
+    let lastStatus = 0;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const r = await resolveHost(embedUrl);
+        if (!r || !r.url) { lastStatus = 404; continue; }
+        if (r.type === 'hls') {
+          const up = await fetchT(r.url, { headers: { 'User-Agent': UA, Referer: r.referer, Accept: '*/*' } }, 12000);
+          lastStatus = up.status;
+          if (!up.ok) continue; // try a fresh CDN edge
+          return playlistResponse(rewriteM3u8(await up.text(), r.url, r.referer, origin));
+        }
+        const hdrs = { 'User-Agent': UA, Referer: r.referer, Accept: '*/*' };
+        const range = req.headers.get('range'); if (range) hdrs.Range = range;
+        const up = await fetchT(r.url, { headers: hdrs }, 20000);
+        lastStatus = up.status;
+        if (!up.ok) continue;
+        return passthrough(up, req);
+      } catch (e) { lastStatus = 502; }
+    }
+    return textResponse('could not resolve a working stream edge (last status ' + lastStatus + ')', lastStatus || 502);
+  }
+
+  // /proxy?u=<b64url>&r=<b64url>  (also accepts legacy /proxy/<encoded absolute url>)
+  if (path === '/proxy' || path.startsWith('/proxy/')) {
+    let target = url.searchParams.get('u');
+    const refParam = url.searchParams.get('r');
+    target = target ? unb64url(target) : decodeURIComponent(path.slice(7));
+    const referer = refParam ? unb64url(refParam) : undefined;
+    if (!/^https?:\/\//i.test(target || '')) return textResponse('bad target', 400);
+    try {
+      const hdrs = { 'User-Agent': UA, Accept: '*/*' };
+      if (referer) hdrs.Referer = referer;
+      const range = req.headers.get('range'); if (range) hdrs.Range = range;
+      const up = await fetchT(target, { headers: hdrs, redirect: 'follow' }, 15000);
+      if (!up.ok) return textResponse('upstream ' + up.status, up.status);
+      const ctype = up.headers.get('content-type') || '';
+      if (/\.m3u8(\?|$)/i.test(target) || /mpegurl/i.test(ctype)) {
+        return playlistResponse(rewriteM3u8(await up.text(), target, referer, url.origin));
+      }
+      return passthrough(up, req);
+    } catch (e) {
+      return textResponse('proxy error: ' + e.message, 502);
+    }
+  }
+
+  if (path.startsWith('/resolve/')) {
+    try {
+      const target = decodeURIComponent(path.slice(9));
+      if (!/^https?:\/\//.test(target)) return new Response('bad', { status: 400, headers: CORS_HEADERS });
+      const out = await resolveHost(target);
+      return json({ url: target, ...out });
+    } catch (e) {
+      return json({ error: e.message }, 500);
+    }
+  }
+
+  return json({ name: NAME, status: 'ok', manifest: url.origin + '/manifest.json', version: VERSION });
+}
+
+module.exports = {
+  async fetch(req, env, ctx) {
+    try {
+      return await handleRequest(new URL(req.url), req);
+    } catch (e) {
+      return json({ error: e.message }, 500);
+    }
+  },
+};
