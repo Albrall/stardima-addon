@@ -366,7 +366,12 @@ const server = http.createServer(async (req, res) => {
       return handleProxy(req, res, query);
     }
     let m;
-    if ((m = path.match(/^\/catalog\/([^/]+)\/([^/]+)$/))) {
+    if ((m = path.match(/^\/catalog\/([^/]+)\/([^/]+)(?:\/([^/]+))?$/))) {
+      // Stremio/Nuvio pass extras in the PATH: /catalog/type/id/search=X&skip=Y.json
+      for (const kv of (m[3] || '').split('&')) {
+        const i = kv.indexOf('=');
+        if (i > 0) query[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1));
+      }
       return handleCatalog(req, res, m[1], m[2], query);
     }
     if ((m = path.match(/^\/meta\/([^/]+)\/([^/]+)$/))) {
