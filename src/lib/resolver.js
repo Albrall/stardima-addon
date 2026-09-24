@@ -110,32 +110,45 @@ function hostRank(srv) {
   for (const [re, r] of HOST_PRIORITY) if (re.test(s)) return r;
   return 7;
 }
-function withTimeout(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((_, rej) => setTimeout(() => rej(new Error('probe timeout')), ms)),
-  ]);
+// Host health memory. A static priority puts the habitual winner (uqload) first
+// with zero latency; background probes then demote hosts that start failing, so
+// the *next* request is already correct.
+const _health = new Map(); // hostname -> { ok: boolean, t: number }
+const HEALTH_OK_TTL = 30 * 60 * 1000;
+const HEALTH_FAIL_TTL = 10 * 60 * 1000;
+
+function hostKeyOf(srv) {
+  try { return new URL(srv.embedUrl).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
 }
-// Order servers so a WORKING one is first: rank by host, then health-probe the
-// top few in parallel (resolution is cheap; the player only fetches the winner).
+function healthPenalty(srv) {
+  const h = _health.get(hostKeyOf(srv));
+  if (!h) return 0;
+  if (Date.now() - h.t > (h.ok ? HEALTH_OK_TTL : HEALTH_FAIL_TTL)) return 0;
+  return h.ok ? -0.5 : 20; // known-good floats up, known-dead sinks (no exceptions)
+}
+function probeServers(servers, slots) {
+  const jobs = [];
+  for (const srv of servers.slice(0, slots || 3)) {
+    const key = hostKeyOf(srv);
+    if (!key || !/^https?:/i.test(srv.embedUrl || '')) continue;
+    jobs.push(
+      resolveHost(srv.embedUrl)
+        .then((r) => { _health.set(key, { ok: !!(r && r.url), t: Date.now() }); })
+        .catch(() => { _health.set(key, { ok: false, t: Date.now() }); })
+    );
+  }
+  return jobs;
+}
 async function orderServers(servers, opts = {}) {
   const list = (servers || []).slice();
-  const ranked = list.map((s) => ({ s, rank: hostRank(s) })).sort((a, b) => a.rank - b.rank || 0);
-  if (opts.probe === false) return ranked.map((x) => x.s);
-  const maxProbe = opts.maxProbe || 5;
-  const head = ranked.slice(0, maxProbe);
-  const rest = ranked.slice(maxProbe).map((x) => x.s);
-  const probed = await Promise.all(head.map(async ({ s }) => {
-    try {
-      const r = await withTimeout(resolveHost(s.embedUrl), opts.probeMs || 9000);
-      return { s, ok: !!(r && r.url) };
-    } catch (e) { return { s, ok: false }; }
-  }));
-  return [
-    ...probed.filter((x) => x.ok).map((x) => x.s),
-    ...probed.filter((x) => !x.ok).map((x) => x.s),
-    ...rest,
-  ];
+  if (opts.probe === false) return list.sort((a, b) => hostRank(a) - hostRank(b));
+  const ranked = list
+    .map((s, i) => ({ s, i, rank: hostRank(s) + healthPenalty(s) }))
+    .sort((a, b) => a.rank - b.rank || a.i - b.i);
+  const out = ranked.map((x) => x.s);
+  const jobs = probeServers(out, opts.maxProbe || 3); // best-effort, never awaited
+  if (opts.waitUntil) { try { opts.waitUntil(Promise.all(jobs)); } catch (e) { /* no ctx */ } }
+  return out;
 }
 
 module.exports = { resolveEpisode, getServers, getMovieServers, orderServers, hostRank, getHyperwatchingServers, extractInertiaProps };

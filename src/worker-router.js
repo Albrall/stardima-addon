@@ -12,7 +12,16 @@ const { resolveHost, UA } = require('./lib/hosts');
 const NAME = 'Stardima';
 const VERSION = '3.0.0';
 const ID = 'community.stardima';
-const CHUNK_SIZE = 450; // items per catalog (Nuvio loads one catalog in one go)
+const CHUNK_SIZE = 450; // items per chunked catalog
+// 'single'  = two long catalogs (all series, all movies) — one list, nothing to navigate
+// 'chunked' = 450-item shelves (stardima-s1..s6, stardima-m1..m4)
+// A specific install can pin a mode: {url}/manifest.json?mode=chunked
+const CATALOG_MODE_DEFAULT = 'single';
+function catalogMode(url) {
+  const v = (url && url.searchParams && url.searchParams.get('mode')) || '';
+  if (v === 'chunked' || v === 'single') return v;
+  return CATALOG_MODE_DEFAULT;
+}
 
 // Replaced at build time by build-worker.js with catalog-index.min.json
 const INDEX = /*__INDEX__*/{};
@@ -148,25 +157,32 @@ function chunkCount(key) {
 }
 
 // ---- manifest -------------------------------------------------------------
-function buildManifest() {
+function buildManifest(url) {
+  const mode = catalogMode(url);
   const arabicNum = (n) => String(n).replace(/\d/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
-  const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
+  const searchExtra = [{ name: 'search', isRequired: false }];
   const series = [], movies = [];
-  for (let c = 1; c <= sChunks; c++) series.push({
-    id: 'stardima-s' + c, type: 'series',
-    name: c === 1 ? `${NAME}: مسلسلات` : `${NAME}: مسلسلات (${arabicNum(c)})`,
-    extra: [{ name: 'search', isRequired: false }],
-  });
-  for (let c = 1; c <= mChunks; c++) movies.push({
-    id: 'stardima-m' + c, type: 'movie',
-    name: c === 1 ? `${NAME}: أفلام` : `${NAME}: أفلام (${arabicNum(c)})`,
-    extra: [{ name: 'search', isRequired: false }],
-  });
+  if (mode === 'single') {
+    series.push({ id: 'stardima', type: 'series', name: `${NAME}: مسلسلات`, extra: searchExtra });
+    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: أفلام`, extra: searchExtra });
+  } else {
+    const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
+    for (let c = 1; c <= sChunks; c++) series.push({
+      id: 'stardima-s' + c, type: 'series',
+      name: c === 1 ? `${NAME}: مسلسلات` : `${NAME}: مسلسلات (${arabicNum(c)})`,
+      extra: searchExtra,
+    });
+    for (let c = 1; c <= mChunks; c++) movies.push({
+      id: 'stardima-m' + c, type: 'movie',
+      name: c === 1 ? `${NAME}: أفلام` : `${NAME}: أفلام (${arabicNum(c)})`,
+      extra: searchExtra,
+    });
+  }
+  const sN = (((INDEX.series || {}).items) || []).length;
+  const mN = (((INDEX.movies || {}).items) || []).length;
   return {
     id: ID, version: VERSION, name: `${NAME} — ستارديما (أ-ي)`,
-    description: 'مكتبة ستارديما كاملة مرتبة أبجديًا: ' +
-      ((((INDEX.series || {}).items) || []).length) + ' مسلسل و' +
-      ((((INDEX.movies || {}).items) || []).length) + ' فيلم، مع حلقات مترجمة وبث مباشر',
+    description: 'مكتبة ستارديما كاملة مرتبة أبجديًا: ' + sN + ' مسلسل و' + mN + ' فيلم، مع حلقات وبث مباشر',
     resources: ['catalog', 'meta', 'stream'], types: ['series', 'movie'],
     idPrefixes: ['stardima:'], catalogs: [...series, ...movies],
     behaviorHints: { configurableFor: false, configurationRequired: false },
@@ -174,13 +190,15 @@ function buildManifest() {
 }
 
 // ---- routes ---------------------------------------------------------------
-async function handleRequest(url, req) {
+let _ctx = null; // execution context, so probes can outlive the response
+async function handleRequest(url, req, ctx) {
+  _ctx = ctx || _ctx;
   let path = url.pathname;
   if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
   if (path.endsWith('.json')) path = path.slice(0, -5);
 
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
-  if (path === '/manifest.json' || path === '/manifest') return json(buildManifest());
+  if (path === '/manifest.json' || path === '/manifest') return json(buildManifest(url));
   if (path === '/' || path === '/configure') {
     return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${NAME} Add-on</title></head>
@@ -223,19 +241,26 @@ async function handleRequest(url, req) {
       return json({ metas });
     }
 
-    const sorted = await sortedItems(keyOf(id));
+    const key = type === 'series' ? 'series' : 'movies'; // the type segment is authoritative
+    const sorted = await sortedItems(key);
     const total = sorted.length;
+    const toMeta = (it) => ({
+      id: 'stardima:' + it[0], type, name: it[1],
+      poster: decodePoster(it[2]) || undefined,
+      releaseInfo: it[3] || undefined,
+    });
+    // Older installs (and ?mode=chunked) still ask for stardima-s3 / stardima-m2
+    // style ids — keep serving those as 450-item slices so nothing breaks.
+    const isChunkId = /^stardima-[sm]\d+$/.test(id);
+    if (!isChunkId && catalogMode(url) === 'single') {
+      // One long list per type: Nuvio loads it once and scrolls locally.
+      return json({ metas: sorted.map(toMeta) });
+    }
     const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
     const c = Math.min(Math.max(1, chunkOf(id)), chunks);
     const start = (c - 1) * CHUNK_SIZE;
     const end = c === chunks ? total : Math.min(start + CHUNK_SIZE, total); // last chunk uncapped
-    return json({
-      metas: sorted.slice(start, end).map(it => ({
-        id: 'stardima:' + it[0], type, name: it[1],
-        poster: decodePoster(it[2]) || undefined,
-        releaseInfo: it[3] || undefined,
-      })),
-    });
+    return json({ metas: sorted.slice(start, end).map(toMeta) });
   }
 
   // /meta/{type}/{id}.json  (id = stardima:{slug})
@@ -301,7 +326,10 @@ async function handleRequest(url, req) {
         return json({ streams: [{ name: NAME, title: msg, externalUrl: BASE + '/membership' }] });
       }
       // Working server first: rank by host reachability, then health-probe.
-      ordered = await orderServers(result.servers || [], { maxProbe: 3, probeMs: 7000 });
+      ordered = await orderServers(result.servers || [], {
+        maxProbe: 3,
+        waitUntil: (p) => { try { _ctx && _ctx.waitUntil(p); } catch (e) { /* no ctx */ } },
+      });
       if (ordered.length) _cache.set(ck, { t: Date.now(), v: ordered });
     }
     const origin = url.origin;
@@ -382,7 +410,7 @@ async function handleRequest(url, req) {
 module.exports = {
   async fetch(req, env, ctx) {
     try {
-      return await handleRequest(new URL(req.url), req);
+      return await handleRequest(new URL(req.url), req, ctx);
     } catch (e) {
       return json({ error: e.message }, 500);
     }
