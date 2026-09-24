@@ -224,6 +224,19 @@ async function handleStream(req, res, type, id) {
   sendJson(res, 200, { streams });
 }
 
+// ---------- diagnostics: show what THIS host sees (direct vs worker relay) ----------
+async function handleDebug(req, res) {
+  const W = 'https://stardima-proxy.ingots-18joist.workers.dev';
+  const out = { host: 'render-or-local', ts: new Date().toISOString() };
+  try { const r = await fetch(stardima.BASE + '/', { headers: { 'User-Agent': 'Mozilla/5.0' } }); out.direct_root = r.status; }
+  catch (e) { out.direct_root = 'ERR ' + e.message; }
+  try { const r = await fetch(W + '/', {}); out.worker_root = r.status; }
+  catch (e) { out.worker_root = 'ERR ' + e.message; }
+  try { const r = await fetch(W + '/search?query=naruto', { headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' } }); out.worker_search = r.status; }
+  catch (e) { out.worker_search = 'ERR ' + e.message; }
+  sendJson(res, 200, out);
+}
+
 // ---------- proxy: resolve a host EMBED fresh at playback time ----------
 // The upstream m3u8 token is short-lived, so we resolve it the moment the
 // player asks, then immediately fetch + rewrite the master playlist.
@@ -323,6 +336,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (path === '/manifest.json' || path === '/manifest') {
       return sendJson(res, 200, manifest);
+    }
+    if (path === '/debug') {
+      return handleDebug(req, res);
     }
     if (path === '/proxy/embed') {
       return handleProxyEmbed(req, res, query);
