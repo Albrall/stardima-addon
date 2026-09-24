@@ -646,15 +646,15 @@ async function searchCatalog(query) {
   const data = await getJson('/search?query=' + encodeURIComponent(query));
   const vids = (data && data.videos) || [];
   return vids.map((v) => {
-    const isMovie = v.type === 'movie' || v.is_movie === 1 || v.is_movie === true;
-    const type = isMovie ? 'movie' : 'series';
-    const slug = v.slug || v.id;
+    const um = (v.url || '').match(/\/(tvshow|movie)\/([a-z0-9-]+)/i);
+    const type = v.is_series === false || v.type === 'movie' ? 'movie' : (um ? (um[1].toLowerCase() === 'movie' ? 'movie' : 'series') : 'series');
+    const slug = um ? um[2] : (v.slug || String(v.id));
     return {
       id: type + ':' + slug,
       type,
       slug,
       title: decodeEntities(v.title || v.name || ''),
-      poster: absPoster(v.poster || v.cover || (v.poster_path ? 'https://image.tmdb.org/t/p/w500' + v.poster_path : null)) || undefined,
+      poster: absPoster(v.poster_url || v.poster || v.cover || (v.poster_path ? 'https://image.tmdb.org/t/p/w500' + v.poster_path : null)) || undefined,
       year: v.year || v.release_year || undefined,
       description: decodeEntities(v.description || ''),
     };
