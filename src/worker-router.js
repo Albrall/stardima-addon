@@ -4,7 +4,7 @@
  * releases appear in their correct alphabetical position within ~15 minutes. */
 const {
   BASE, getJson, videoToItem, getSeriesMeta, getMovieMeta, getEpisodeLink,
-  searchCatalog, compactPoster, decodePoster, byTitleAr,
+  searchCatalog, compactPoster, decodePoster, byTitleAr, normTitle,
 } = require('./lib/stardima');
 const { getServers, getMovieServers, orderServers } = require('./lib/resolver');
 const { resolveHost, UA } = require('./lib/hosts');
@@ -138,6 +138,54 @@ async function fetchNewest(ep) {
   return out.length ? out : (hit ? hit.v : []);
 }
 
+// ---- search: live site results + instant match on the embedded index -----
+let _rows = null;
+function indexRows() {
+  if (_rows) return _rows;
+  _rows = [];
+  for (const key of ['series', 'movies']) {
+    const type = key === 'movies' ? 'movie' : 'series';
+    for (const it of ((INDEX[key] || {}).items) || []) {
+      _rows.push({ type, slug: it[0], title: it[1], poster: it[2], year: it[3], n: normTitle(it[1]) });
+    }
+  }
+  return _rows;
+}
+function searchIndex(q) {
+  const nq = normTitle(q);
+  if (nq.length < 2) return [];
+  const out = [];
+  for (const r of indexRows()) {
+    const i = r.n.indexOf(nq);
+    if (i < 0) continue;
+    out.push({ id: r.type + ':' + r.slug, type: r.type, slug: r.slug, title: r.title,
+      poster: decodePoster(r.poster) || undefined, year: r.year || undefined });
+  }
+  return out;
+}
+// Site results win when both know a title; the index adds everything the site
+// search misses (odd spellings, long-tail titles, or the site being down).
+function mergeSearch(site, q) {
+  const out = new Map();
+  for (const x of site || []) {
+    const type = x.type || 'series';
+    out.set(type + ':' + (x.slug || x.id), { ...x, type });
+  }
+  for (const x of searchIndex(q)) if (!out.has(x.id)) out.set(x.id, x);
+  const nq = normTitle(q);
+  const arr = [...out.values()];
+  for (const x of arr) x.q = normTitle(x.title).startsWith(nq) ? 0 : 1; // prefix hits first
+  arr.sort((a, b) => a.q - b.q || byTitleAr(a.title, b.title));
+  return arr.slice(0, 150);
+}
+
+async function newestShelf(key) {
+  const items = await fetchNewest(epOfKey(key));
+  const seen = new Set(); const out = [];
+  for (const it of items) { if (seen.has(it[0])) continue; seen.add(it[0]); out.push(it); }
+  return out;
+}
+
 async function sortedItems(key) {
   const ck = 'sorted:' + key;
   const hit = _cache.get(ck);
@@ -163,8 +211,10 @@ function buildManifest(url) {
   const searchExtra = [{ name: 'search', isRequired: false }];
   const series = [], movies = [];
   if (mode === 'single') {
-    series.push({ id: 'stardima', type: 'series', name: `${NAME}: مسلسلات`, extra: searchExtra });
-    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: أفلام`, extra: searchExtra });
+    series.push({ id: 'stardima-new', type: 'series', name: `${NAME}: أحدث المسلسلات`, extra: searchExtra });
+    series.push({ id: 'stardima', type: 'series', name: `${NAME}: مسلسلات (أ-ي)`, extra: searchExtra });
+    movies.push({ id: 'stardima-new-movies', type: 'movie', name: `${NAME}: أحدث الأفلام`, extra: searchExtra });
+    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: أفلام (أ-ي)`, extra: searchExtra });
   } else {
     const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
     for (let c = 1; c <= sChunks; c++) series.push({
@@ -229,6 +279,29 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
 </div></body></html>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS } });
   }
 
+  if (path === '/health') {
+    const hk = 'health:site';
+    let site = _cache.get(hk);
+    if (!site || Date.now() - site.t > 5 * 60 * 1000) {
+      let v;
+      try { const j = await getJson(BASE + '/mosalsalat?page=1'); v = { ok: true, rows: ((j.videos) || []).length }; }
+      catch (e) { v = { ok: false, error: String((e && e.message) || e).slice(0, 120) }; }
+      site = { t: Date.now(), v }; _cache.set(hk, site);
+    }
+    const keys = [..._cache.keys()];
+    return json({
+      ok: !!site.v.ok, version: VERSION, mode: catalogMode(url), site: site.v,
+      index: { built: INDEX.built || null, series: (((INDEX.series || {}).items) || []).length, movies: (((INDEX.movies || {}).items) || []).length },
+      caches: {
+        total: keys.length,
+        meta: keys.filter(k => k.startsWith('meta:')).length,
+        servers: keys.filter(k => k.startsWith('servers:') || k.startsWith('movieServers:')).length,
+        search: keys.filter(k => k.startsWith('search:')).length,
+      },
+      now: new Date().toISOString(),
+    });
+  }
+
   // /catalog/{type}/{id}[/extras].json — Stremio puts extras in the path segment
   if (path.startsWith('/catalog/')) {
     const m = /^\/catalog\/([^/]+)\/([^/]+)(?:\/([^/]+))?$/.exec(path);
@@ -251,28 +324,29 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       const sc = 'search:' + q;
       let hitS = _cache.get(sc);
       if (!hitS || Date.now() - hitS.t > 10 * 60 * 1000) {
-        const v = await searchCatalog(q);
-        hitS = { t: Date.now(), v };
+        let site = [];
+        try { site = await searchCatalog(q); } catch (e) { site = []; } // site down? the embedded index still answers
+        hitS = { t: Date.now(), v: mergeSearch(site, q) };
         _cache.set(sc, hitS); // shared across catalog types and users
       }
-      const res = hitS.v;
-      const metas = res.filter(x => (x.type || 'series') === type)
-        .sort((a, b) => byTitleAr(a.title, b.title))
-        .map(x => ({
-          id: 'stardima:' + (x.slug || x.id), type, name: x.title,
-          poster: x.poster || undefined, releaseInfo: x.year ? String(x.year) : undefined,
-        }));
+      const metas = hitS.v.filter(x => x.type === type).map(x => ({
+        id: 'stardima:' + (x.slug || x.id), type, name: x.title,
+        poster: x.poster || undefined, releaseInfo: x.year ? String(x.year) : undefined,
+      }));
       return json({ metas });
     }
 
     const key = type === 'series' ? 'series' : 'movies'; // the type segment is authoritative
-    const sorted = await sortedItems(key);
-    const total = sorted.length;
     const toMeta = (it) => ({
       id: 'stardima:' + it[0], type, name: it[1],
       poster: decodePoster(it[2]) || undefined,
       releaseInfo: it[3] || undefined,
     });
+    if (id === 'stardima-new' || id === 'stardima-new-movies') {
+      return json({ metas: (await newestShelf(key)).map(toMeta) }); // site order = newest first
+    }
+    const sorted = await sortedItems(key);
+    const total = sorted.length;
     // Older installs (and ?mode=chunked) still ask for stardima-s3 / stardima-m2
     // style ids — keep serving those as 450-item slices so nothing breaks.
     const isChunkId = /^stardima-[sm]\d+$/.test(id);

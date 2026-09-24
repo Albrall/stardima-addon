@@ -48,18 +48,23 @@ function ajaxHeaders(referer) {
 const WORKER_FALLBACK = (process.env.STARDIMA_RELAY || 'https://stardima-proxy.ingots-18joist.workers.dev').replace(/\/+$/, '');
 
 async function smartFetch(path, headers) {
+  // Accept both relative paths and absolute URLs — callers pass `${BASE}/...`
+  // in a few places, and blindly prepending BASE produced a doubled URL that
+  // failed silently (new-arrivals merge, health check).
+  const target = /^https?:\/\//i.test(path) ? path : BASE + path;
+  const rel = target.startsWith(BASE) ? target.slice(BASE.length) : path;
   let res;
-  try { res = await fetch(BASE + path, { headers }); }
+  try { res = await fetch(target, { headers }); }
   catch (e) { res = null; }
   if (res && res.ok) return res;
   const blocked = !res || res.status === 403 || res.status === 429 || res.status === 503;
   if (blocked && WORKER_FALLBACK) {
     try {
-      const r2 = await fetch(WORKER_FALLBACK + path, { headers });
+      const r2 = await fetch(WORKER_FALLBACK + rel, { headers });
       if (r2.ok) return r2;
     } catch (e) { /* fall through to original error */ }
   }
-  if (!res) throw new Error('network error for ' + path);
+  if (!res) throw new Error('network error for ' + target);
   return res;
 }
 

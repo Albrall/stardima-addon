@@ -15,6 +15,8 @@ Stremio and Nuvio: browse, search, episode lists and playable streams.
 | `meta/{type}/{id}` | Series: seasons/episodes (e.g. المحقق كونان = 698 episodes). Movie: poster/description |
 | `stream/{type}/{id}` | One stream per upstream server, **health-probed and ordered** so a working host comes first (Uqload/Mixdrop reachable from the edge; Goodstream/Savefiles/Streamhg 404, Lulustream 403) |
 | `proxy/embed?u=` | Resolves the host embed **fresh at playback time** (upstream m3u8 tokens are short-lived), rewrites playlists so every URI routes back through the Worker |
+| `catalog/{type}/stardima-new[-movies]` | "أحدث المسلسلات / أحدث الأفلام" shelves — newest first (site order, merged live) |
+| `health` | Diagnostics: site reachable?, index size + build date, cache breakdown |
 | `proxy?u=&r=` | Streams playlists/segments/MP4 with the right Referer; supports `Range` (seeking) |
 
 Ids are canonical: `stardima:{slug}` for titles and `stardima:{slug}:{episodeId}` for

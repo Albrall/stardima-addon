@@ -21,7 +21,7 @@ function rewrite(code, fromId) {
 
 // worker-router.js contains `const INDEX = /*__INDEX__*/{};` — inject the real index
 const idx = JSON.parse(fs.readFileSync(path.join(ROOT, 'catalog-index.min.json'), 'utf8'));
-const indexLiteral = JSON.stringify({ series: idx.series, movies: idx.movies });
+const indexLiteral = JSON.stringify({ built: idx.built, series: idx.series, movies: idx.movies });
 function prep(f) {
   let code = fs.readFileSync(path.join(ROOT, f), 'utf8');
   if (f === 'worker-router.js') {
