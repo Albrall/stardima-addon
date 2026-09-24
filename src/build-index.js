@@ -81,6 +81,8 @@ async function build(ep, label) {
   const movies = await build('aflam', 'movies');
   const index = { built: new Date().toISOString(), base: BASE, series, movies };
   require('fs').writeFileSync(__dirname + '/catalog-index.json', JSON.stringify(index));
+  // compact copy — this is what build-worker.js embeds
+  require('fs').writeFileSync(__dirname + '/catalog-index.min.json', JSON.stringify(index));
   const kb = (require('fs').statSync(__dirname + '/catalog-index.json').size / 1024).toFixed(0);
   console.log(`index written: ${kb} KB in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   console.log('first 3 series:', series.items.slice(0, 3).map(i => i[1]));

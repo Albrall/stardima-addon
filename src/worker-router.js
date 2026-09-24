@@ -116,6 +116,27 @@ async function episodeIdFor(type, id) {
 }
 
 
+// ---- genres (site categories, embedded at build time) --------------------
+function genreLabels() { return (((INDEX.genres || {}).labels) || []); }
+function genreOptions() { return genreLabels().map(([, label]) => label); }
+function genreSlugsOf(slug) {
+  const raw = (((INDEX.genres || {}).items) || {})[slug];
+  if (!raw) return [];
+  return String(raw).split(',').map((n) => (genreLabels()[parseInt(n, 10)] || [])[1]).filter(Boolean);
+}
+function genreMatches(slug, wanted) {
+  const w = String(wanted || '').trim();
+  if (!w) return true;
+  const nw = normTitle(w); // 'أنمي' must match the site's 'انمي'
+  const labels = genreLabels();
+  let gi = labels.findIndex(([sl, lb]) => lb === w || sl === w || normTitle(lb) === nw);
+  if (gi < 0) gi = labels.findIndex(([sl, lb]) => normTitle(lb).indexOf(nw) >= 0); // 'أفلام دورايمون' ⊂ 'أفلام دورايمون - Doraemon Movie'
+  if (gi < 0) return false;
+  const raw = (((INDEX.genres || {}).items) || {})[slug];
+  if (!raw) return false;
+  return (',' + raw + ',').indexOf(',' + gi + ',') >= 0;
+}
+
 // ---- alphabetical catalog (embedded index + live newest pages) ------------
 const _cache = new Map();
 const FRESH_TTL = 15 * 60 * 1000; // 15 min
@@ -211,10 +232,12 @@ function buildManifest(url) {
   const searchExtra = [{ name: 'search', isRequired: false }];
   const series = [], movies = [];
   if (mode === 'single') {
+    const genreExtra = genreOptions().length
+      ? [{ name: 'genre', options: genreOptions(), isRequired: false }] : [];
     series.push({ id: 'stardima-new', type: 'series', name: `${NAME}: أحدث المسلسلات`, extra: searchExtra });
-    series.push({ id: 'stardima', type: 'series', name: `${NAME}: مسلسلات (أ-ي)`, extra: searchExtra });
+    series.push({ id: 'stardima', type: 'series', name: `${NAME}: مسلسلات (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
     movies.push({ id: 'stardima-new-movies', type: 'movie', name: `${NAME}: أحدث الأفلام`, extra: searchExtra });
-    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: أفلام (أ-ي)`, extra: searchExtra });
+    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: أفلام (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
   } else {
     const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
     for (let c = 1; c <= sChunks; c++) series.push({
@@ -345,7 +368,9 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     if (id === 'stardima-new' || id === 'stardima-new-movies') {
       return json({ metas: (await newestShelf(key)).map(toMeta) }); // site order = newest first
     }
-    const sorted = await sortedItems(key);
+    let sorted = await sortedItems(key);
+    if (extras.genre) sorted = sorted.filter((it) => genreMatches(it[0], extras.genre));
+    if (extras.skip) { const sk = parseInt(extras.skip, 10) || 0; if (sk > 0) sorted = sorted.slice(sk); }
     const total = sorted.length;
     // Older installs (and ?mode=chunked) still ask for stardima-s3 / stardima-m2
     // style ids — keep serving those as 450-item slices so nothing breaks.
@@ -373,6 +398,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const meta = type === 'series' ? await getSeriesMeta(slug) : type === 'movie' ? await getMovieMeta(slug) : null;
     if (!meta) return notFound();
     meta.id = 'stardima:' + slug;
+    const gs = genreSlugsOf(slug); if (gs.length) meta.genres = gs;
     let out;
     if (type === 'movie') {
       out = { meta: { ...meta, videos: undefined } };

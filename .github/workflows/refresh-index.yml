@@ -1,0 +1,51 @@
+name: Refresh catalog index (monthly)
+
+# Rebuilds the full-library snapshot from the site, rebuilds the Worker bundle
+# and redeploys it. Runs from GitHub runners (not Cloudflare) because Stardima
+# rate-limits Cloudflare edge IPs after ~50 listing pages.
+on:
+  schedule:
+    - cron: '0 4 1 * *'   # 1st of each month, 04:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build full-library index
+        working-directory: src
+        run: node build-index.js
+
+      - name: Build category (genre) map
+        working-directory: src
+        run: node build-genres.js
+
+      - name: Bundle Worker
+        working-directory: src
+        run: node build-worker.js
+
+      - name: Deploy to Cloudflare
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -e
+          curl -sS -X PUT "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/scripts/stardima-proxy" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -F 'metadata={"main_module":"worker-addon.js","compatibility_date":"2024-09-01"};type=application/json' \
+            -F "worker-addon.js=@worker-addon.js;type=application/javascript+module" \
+            | tee /tmp/cf.json
+          grep -q '"success":true' /tmp/cf.json
+
+      - name: Commit the refreshed snapshot
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A src worker-addon.js index.js
+          git diff --cached --quiet || git commit -m "chore: monthly catalog index refresh ($(date -u +%Y-%m-%d))"
+          git push

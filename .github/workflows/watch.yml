@@ -1,0 +1,39 @@
+name: Health watch (every 6h)
+
+# Watches the live add-on AND the upstream site. A failing run makes GitHub email
+# the repository owner, which is the alert channel.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Worker /health
+        run: |
+          set -e
+          curl -sS --max-time 60 https://stardima-proxy.ingots-18joist.workers.dev/health | tee /tmp/h.json
+          grep -q '"ok":true' /tmp/h.json
+
+      - name: Catalogue + newest shelf
+        run: |
+          set -e
+          n=$(curl -sS --max-time 60 "https://stardima-proxy.ingots-18joist.workers.dev/catalog/series/stardima.json" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["metas"]))')
+          echo "series in catalogue: $n"
+          test "$n" -gt 1000
+
+      - name: Playback chain (resolve + first segment)
+        run: |
+          set -e
+          curl -sS --max-time 90 "https://stardima-proxy.ingots-18joist.workers.dev/stream/series/stardima%3Avideo-58%3A1445.json" -o /tmp/s.json
+          url=$(python3 -c 'import json;print(json.load(open("/tmp/s.json"))["streams"][0]["url"])')
+          curl -sS --max-time 60 "$url" -o /tmp/p.m3u8
+          head -1 /tmp/p.m3u8 | grep -q EXTM3U
+          var=$(grep -v '^#' /tmp/p.m3u8 | head -1)
+          curl -sS --max-time 60 "$var" -o /tmp/v.m3u8
+          seg=$(grep -v '^#' /tmp/v.m3u8 | head -1)
+          code=$(curl -sS --max-time 60 -r 0-40000 -o /dev/null -w '%{http_code}' "$seg")
+          echo "segment status: $code"
+          test "$code" = "206" -o "$code" = "200"

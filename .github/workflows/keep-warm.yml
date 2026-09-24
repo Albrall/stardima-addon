@@ -1,0 +1,16 @@
+name: Keep the relay warm
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping relay (if configured)
+        run: |
+          if [ -n "${{ secrets.RELAY_URL }}" ]; then
+            curl -sS --max-time 120 "${{ secrets.RELAY_URL }}/health" || true
+          else
+            echo "RELAY_URL secret not set — skipping"
+          fi
