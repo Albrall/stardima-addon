@@ -426,13 +426,34 @@ function ajaxHeaders(referer) {
   };
 }
 
+// If a cloud host's IP is blocked by Stardima/Cloudflare (403), automatically
+// fall back to the user's Cloudflare Worker relay (clean CF edge IP). This makes
+// the addon work on Render etc. with NO environment configuration.
+const WORKER_FALLBACK = (process.env.STARDIMA_RELAY || 'https://stardima-proxy.ingots-18joist.workers.dev').replace(/\/+$/, '');
+
+async function smartFetch(path, headers) {
+  let res;
+  try { res = await fetch(BASE + path, { headers }); }
+  catch (e) { res = null; }
+  if (res && res.ok) return res;
+  const blocked = !res || res.status === 403 || res.status === 429 || res.status === 503;
+  if (blocked && WORKER_FALLBACK) {
+    try {
+      const r2 = await fetch(WORKER_FALLBACK + path, { headers });
+      if (r2.ok) return r2;
+    } catch (e) { /* fall through to original error */ }
+  }
+  if (!res) throw new Error('network error for ' + path);
+  return res;
+}
+
 async function getJson(path, referer) {
-  const res = await fetch(BASE + path, { headers: ajaxHeaders(referer) });
+  const res = await smartFetch(path, ajaxHeaders(referer));
   if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + path);
   return res.json();
 }
 async function getHtml(path, referer) {
-  const res = await fetch(BASE + path, { headers: htmlHeaders(referer) });
+  const res = await smartFetch(path, htmlHeaders(referer));
   if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + path);
   return res.text();
 }
