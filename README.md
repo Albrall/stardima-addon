@@ -15,8 +15,11 @@ Stremio and Nuvio: browse, search, episode lists and playable streams.
 | `meta/{type}/{id}` | Series: seasons/episodes (e.g. المحقق كونان = 698 episodes). Movie: poster/description |
 | `stream/{type}/{id}` | One stream per upstream server, **health-probed and ordered** so a working host comes first (Uqload/Mixdrop reachable from the edge; Goodstream/Savefiles/Streamhg 404, Lulustream 403) |
 | `proxy/embed?u=` | Resolves the host embed **fresh at playback time** (upstream m3u8 tokens are short-lived), rewrites playlists so every URI routes back through the Worker |
+| `catalog/{type}/{id}/genre=X` | Filter by one of the site's 36 categories (genres). Arabic letters are normalised, so `أنمي` also matches the site's `انمي`. Composable with `search` and `skip` |
 | `catalog/{type}/stardima-new[-movies]` | "أحدث المسلسلات / أحدث الأفلام" shelves — newest first (site order, merged live) |
 | `health` | Diagnostics: site reachable?, index size + build date, cache breakdown |
+| `health?deep=1` | Runs the full self-check (site + catalog + resolve → playlist → segment) and returns the result |
+| `alert-test` | Sends a test alert (opens/comments a GitHub issue, which emails the owner) |
 | `proxy?u=&r=` | Streams playlists/segments/MP4 with the right Referer; supports `Range` (seeking) |
 
 Ids are canonical: `stardima:{slug}` for titles and `stardima:{slug}:{episodeId}` for
@@ -35,6 +38,25 @@ alphabetical position automatically.
 | Stream servers for an episode | instantly (resolved on play, cached 10 min) |
 | Whole-library snapshot | rebuild `catalog-index.min.json` (below) and redeploy |
 
+## Genres
+
+The site exposes 36 categories (`/mosalsalat?category=<slug>`, `/afam?...`). `build-genres.js`
+walks every category page (~133 pages) and stores slug → category indices, so genre
+filtering is instant and offline. Exposed as the `genre` extra on both browse catalogs
+and as `meta.genres` per title.
+
+## Alerts
+
+`selfCheck()` verifies the upstream site, the embedded catalog and a real playback
+chain (resolve → playlist → first segment). On failure it opens/comments a GitHub
+issue (which emails the owner + is readable on the phone). It runs:
+
+- on Worker cron (if your account accepts cron registration),
+- opportunistically on any addon request, at most once every 6 hours,
+- manually via `/alert-test`.
+
+ntfy.sh is kept as a secondary channel but is unreachable from Cloudflare (522).
+
 ## Layout
 
 ```
@@ -45,7 +67,8 @@ src/
   lib/resolver.js      episode/movie -> server list, health-ordered
   lib/hosts.js         host embed -> m3u8/mp4 (Dean Edwards unpacker, no eval)
   lib/unpacker.js      eval-free p.a.c.k.e.r. decoder (Workers forbid eval)
-  build-index.js       fetches every listing page -> catalog-index.json
+  build-index.js       fetches every listing page -> catalog-index.json (+ compact copy)
+  build-genres.js      walks every category page -> genres.json (slug -> categories)
   build-worker.js      bundles src -> ../worker-addon.js and injects the index
   build-bundle.js      bundles src -> ../index.js (single-file Node server)
 worker-addon.js        generated Worker module (what is deployed)
@@ -83,3 +106,15 @@ curl -X PUT "$CF_API/accounts/$CF_ACCOUNT/workers/scripts/stardima-proxy" \
   `lib/unpacker.js`.
 - ~82% of posters are TMDB URLs; the rest are site-relative and resolve under
   `{base}/storage/`. Both forms are absolutised before they reach the client.
+- **Only uqload is playable from a Cloudflare Worker** (measured 2026-09). Mixdrop and
+  Lulustream hand out IP-bound tokens and 403 their CDN from Cloudflare *and* from
+  Render; savefiles serves a JS challenge; streamhg/goodstream hide the stream behind
+  obfuscated JWPlayer bootstrap code. `uqload` therefore leads the stream list, and the
+  others are labelled "قد لا يعمل من السحابة" so a failed server is not a mystery.
+- A Render relay was built and tested to work around that; it resolved and streamed
+  uqload fine but could not resolve the blocked hosts either, so it was removed —
+  no benefit, only cold starts.
+- Cloudflare's API rejected cron-trigger registration for this script, hence the
+  opportunistic 6-hourly self-check.
+- Per-episode thumbnails are not published by the site (only series posters and an
+  og:image on each /play page), so episode rows show title + number only.

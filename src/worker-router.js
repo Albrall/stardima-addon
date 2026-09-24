@@ -10,6 +10,12 @@ const { getServers, getMovieServers, orderServers } = require('./lib/resolver');
 const { resolveHost, UA } = require('./lib/hosts');
 
 const NAME = 'Stardima';
+// Measured 2026-09: only uqload is playable from a Cloudflare Worker. Mixdrop and
+// Lulustream return IP-bound tokens and 403 the CDN from Cloudflare *and* from
+// Render/other datacenters (verified), savefiles serves a JS challenge, and
+// streamhg/goodstream hide the stream behind obfuscated JWPlayer bootstrap code.
+// So: uqload first, the rest kept as user-visible options that may work later.
+const DEAD_FROM_EDGE = /mixdrop|mxdrop|lulustream|savefiles|hgcloud|streamhg|strema|goodstream/i;
 const VERSION = '3.0.0';
 const ID = 'community.stardima';
 const CHUNK_SIZE = 450; // items per chunked catalog
@@ -262,8 +268,103 @@ function buildManifest(url) {
   };
 }
 
+// ---- self-check + alerting (cron) ----------------------------------------
+// Workers cron triggers run this on a schedule. On failure we push a message to
+// ntfy.sh (free, no account) so the owner gets told *before* users complain.
+const ALERT_TOPIC = 'stardima-alerts-7k2p9q4x'; // ntfy fallback (blocked from CF, kept for non-CF callers)
+const GH_REPO = 'Albrall/stardima-addon';
+// Alerts go to a GitHub issue (which emails the repo owner). Workers cron, the
+// opportunistic timer below, or /alert-test all use this path.
+async function alertIssue(title, body, env) {
+  const token = (env && env.ALERT_GH_TOKEN) || (_env && _env.ALERT_GH_TOKEN);
+  if (!token) return { ok: false, error: 'no ALERT_GH_TOKEN secret' };
+  const H = { Authorization: 'token ' + token, Accept: 'application/vnd.github+json', 'User-Agent': 'stardima-addon' };
+  try {
+    const q = await fetch(`https://api.github.com/repos/${GH_REPO}/issues?state=open&labels=alert&per_page=1`, { headers: H });
+    const open = await q.json();
+    if (Array.isArray(open) && open.length) {
+      const r = await fetch(open[0].comments_url, { method: 'POST', headers: H, body: JSON.stringify({ body }) });
+      return { ok: r.ok, status: r.status, updated: open[0].number };
+    }
+    const r = await fetch(`https://api.github.com/repos/${GH_REPO}/issues`, {
+      method: 'POST', headers: H,
+      body: JSON.stringify({ title, body, labels: ['alert'] }),
+    });
+    const j = await r.json();
+    return { ok: r.ok, status: r.status, issue: j.number, url: j.html_url };
+  } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+}
+async function alertPush(title, message, ok, env) {
+  const viaIssue = await alertIssue(title, message, env);
+  if (viaIssue && viaIssue.ok) return viaIssue;
+  try {
+    const r = await fetch('https://ntfy.sh/' + ALERT_TOPIC, {
+      method: 'POST',
+      headers: { Title: encodeURIComponent(title), Priority: ok ? '3' : '5', Tags: ok ? 'white_check_mark' : 'warning' },
+      body: message,
+    });
+    return { status: r.status, ok: r.ok };
+  } catch (e) { return { status: 0, ok: false, error: String((e && e.message) || e) }; }
+}
+
+async function selfCheck() {
+  const out = { at: new Date().toISOString(), checks: {} };
+  let ok = true;
+  // 1) upstream site
+  try {
+    const j = await getJson(BASE + '/mosalsalat?page=1');
+    out.checks.site = { ok: ((j.videos) || []).length > 0, rows: ((j.videos) || []).length };
+  } catch (e) { out.checks.site = { ok: false, error: String((e && e.message) || e).slice(0, 100) }; }
+  // 2) catalog from the embedded index
+  try {
+    const arr = await sortedItems('series');
+    out.checks.catalog = { ok: arr.length > 1000, items: arr.length };
+  } catch (e) { out.checks.catalog = { ok: false, error: String(e.message).slice(0, 100) }; }
+  // 3) full playback chain on a known episode (resolve -> playlist -> segment)
+  try {
+    const servers = await getServers('1445');
+    const list = await orderServers((servers && servers.servers) || [], { probe: false });
+    let play = { ok: false };
+    for (const srv of list.slice(0, 3)) {
+      const r = await resolveHost(srv.embedUrl);
+      if (!r || !r.url) continue;
+      const hdr = { 'User-Agent': UA, Referer: r.referer, Accept: '*/*' };
+      const nonTag = (t) => String(t).split(/\r?\n/).find((l) => l && !l.startsWith('#'));
+      const up = await fetchT(r.url, { headers: hdr }, 15000);
+      if (!up.ok) continue;
+      if (r.type !== 'hls') { play = { ok: true, host: srv.name, type: r.type }; break; }
+      const vurl = new URL(nonTag(await up.text()), r.url).href;
+      const vu = await fetchT(vurl, { headers: hdr }, 15000);
+      if (!vu.ok) continue;
+      const surl = new URL(nonTag(await vu.text()), vurl).href;
+      const su = await fetchT(surl, { headers: { ...hdr, Range: 'bytes=0-1000' } }, 20000);
+      play = { ok: !!su.ok, host: srv.name, type: r.type, segment: su.status };
+      if (su.ok) break;
+    }
+    out.checks.playback = play;
+  } catch (e) { out.checks.playback = { ok: false, error: String(e.message).slice(0, 100) }; }
+  for (const v of Object.values(out.checks)) if (!v.ok) ok = false;
+  out.ok = ok;
+  return out;
+}
+
 // ---- routes ---------------------------------------------------------------
 let _ctx = null; // execution context, so probes can outlive the response
+let _env = null; // worker env (holds ALERT_GH_TOKEN when configured)
+let _lastCheck = 0;
+const CHECK_EVERY = 6 * 60 * 60 * 1000;
+function maybeSelfCheck(ctx) {
+  if (Date.now() - _lastCheck < CHECK_EVERY) return;
+  _lastCheck = Date.now();
+  const p = (async () => {
+    const r = await selfCheck();
+    if (!r.ok) {
+      const lines = Object.entries(r.checks).map(([k, v]) => (v.ok ? 'OK ' : 'FAIL ') + k + ': ' + JSON.stringify(v)).join('\n');
+      await alertPush('تنبيه: عطل في أدئون ستارديما', lines, false, _env);
+    }
+  })().catch(() => {});
+  try { ctx && ctx.waitUntil(p); } catch (e) { /* no ctx */ }
+}
 async function handleRequest(url, req, ctx) {
   _ctx = ctx || _ctx;
   let path = url.pathname;
@@ -271,7 +372,7 @@ async function handleRequest(url, req, ctx) {
   if (path.endsWith('.json')) path = path.slice(0, -5);
 
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
-  if (path === '/manifest.json' || path === '/manifest') return json(buildManifest(url));
+  if (path === '/manifest.json' || path === '/manifest') { maybeSelfCheck(_ctx); return json(buildManifest(url)); }
   if (path === '/' || path === '/configure') {
     return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${NAME} — ستارديما (أ-ي)</title>
@@ -302,6 +403,13 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
 </div></body></html>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS } });
   }
 
+  if (path === '/alert-test') {
+    const res = await alertIssue('اختبار: تنبيه أدئون ستارديما', 'هذه رسالة اختبار — وصلتك لأن التنبيهات تعمل. ستصلك رسالة مشابهة تلقائيًا إذا وقع عطل في الأدئون أو في موقع ستارديما.', _env);
+    return json({ sent: !!res.ok, via: 'github-issue', result: res });
+  }
+  if (path === '/health' && url.searchParams.get('deep')) {
+    return json(await selfCheck());
+  }
   if (path === '/health') {
     const hk = 'health:site';
     let site = _cache.get(hk);
@@ -460,7 +568,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     return json({
       streams: (ordered || []).map((srv) => ({
         name: `${NAME} · ${srv.name}`,
-        title: `${srv.name}${srv.is_vip ? ' (VIP)' : ''}`,
+        title: `${srv.name}${srv.is_vip ? ' (VIP)' : ''}${DEAD_FROM_EDGE.test((srv.name || '') + ' ' + (srv.embedUrl || '')) ? ' (قد لا يعمل من السحابة)' : ''}`,
         url: `${origin}/proxy/embed?u=${b64url(srv.embedUrl)}&n=${b64url(srv.name || '')}`,
         behaviorHints: { notWebReady: true, bingeGroup: srv.name },
       })),
@@ -532,8 +640,17 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
 }
 
 module.exports = {
+  async scheduled(event, env, ctx) {
+    _env = env || _env;
+    const r = await selfCheck();
+    const lines = Object.entries(r.checks).map(([k, v]) => (v.ok ? '✅' : '❌') + ' ' + k + ': ' + JSON.stringify(v)).join('\n');
+    if (!r.ok) await alertPush('تنبيه: عطل في أدئون ستارديما', lines, false, env);
+    return r;
+  },
   async fetch(req, env, ctx) {
+    _env = env || _env;
     try {
+      maybeSelfCheck(ctx);
       return await handleRequest(new URL(req.url), req, ctx);
     } catch (e) {
       return json({ error: e.message }, 500);
