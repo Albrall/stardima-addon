@@ -133,27 +133,37 @@ async function episodeIdFor(type, id) {
 // Our tags come from build-ours.js (Arabic title + synopsis + year + the site's
 // hand-curated collections). Options are merged by normalised label: where our
 // tag and a site category share a name (e.g. 'أكشن'), one option matches BOTH.
-function siteGenreLabels() { return (((INDEX.genres || {}).labels) || []); }
+// Only these of the site's own categories are surfaced as filters (owner's pick):
+// جييم, سبيستون (+ إصدارات سبيستون), سبيس باور, mbc3. The rest stay in the data
+// (they still boost our derived tags) but are not offered as separate options.
+const SITE_KEEP = ['mbc3', 'sbyston', 'asdarat-sbyston', 'sbys-baor', 'aflam-gyym-jeem'];
+function siteGenreLabels() {
+  const all = (((INDEX.genres || {}).labels) || []);
+  return all.filter(([slug]) => SITE_KEEP.indexOf(slug) >= 0);
+}
 function ourGenreLabels() { return (((INDEX.ourGenres || {}).labels) || []); }
 
 let _gmap = null;
 function genreMap() {
   if (_gmap) return _gmap;
-  const ours = ourGenreLabels(), site = siteGenreLabels();
+  const ours = ourGenreLabels();
+  const allSite = (((INDEX.genres || {}).labels) || []);
+  const site = allSite
+    .map(([slug, label], i) => [slug, label, i])
+    .filter(([slug]) => SITE_KEEP.indexOf(slug) >= 0);
   const options = [], sources = {}, usedSite = new Set();
   for (let i = 0; i < ours.length; i++) {
     const label = ours[i], n = normTitle(label);
     const list = [{ kind: 'our', i }];
-    for (let j = 0; j < site.length; j++) {
-      if (normTitle(site[j][1]) === n) { list.push({ kind: 'site', i: j }); usedSite.add(j); }
+    for (const [slug, slabel, sIdx] of site) {
+      if (normTitle(slabel) === n) { list.push({ kind: 'site', i: sIdx }); usedSite.add(sIdx); }
     }
     options.push(label); sources[label] = list;
   }
-  for (let j = 0; j < site.length; j++) {
-    if (usedSite.has(j)) continue;
-    const label = site[j][1];
-    if (options.indexOf(label) >= 0) continue;
-    options.push(label); sources[label] = [{ kind: 'site', i: j }];
+  for (const [slug, slabel, sIdx] of site) {
+    if (usedSite.has(sIdx)) continue;
+    if (options.indexOf(slabel) >= 0) continue;
+    options.push(slabel); sources[slabel] = [{ kind: 'site', i: sIdx }];
   }
   _gmap = { options, sources };
   return _gmap;
