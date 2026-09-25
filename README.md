@@ -45,9 +45,19 @@ Two layers, merged into a single 59-entry filter:
 1. **The site's own categories** — `build-genres.js` walks every category page
    (~133 pages) and stores slug → category indices. 36 categories, instant and offline,
    including hand-curated collections (Ben 10, MBC3, أفلام كونان, دورايمون, هاري بوتر…).
-2. **Our derived tags** — `build-ours.js` fetches the whole library (title + Arabic
-   synopsis + year) and classifies it with a weighted Arabic lexicon (word-exact and
-   stem matching, definite-article aware), boosted by the site's curated collections.
+2. **Our derived tags** — built by a three-step pipeline that ends in a trained model:
+
+   - `build-tmdb.js`      per-title TMDB search (public pages, Arabic search) -> official genres
+   - `build-wikidata.js`  bulk SPARQL label join for Arabic titles, filtered to work types
+   - `build-bulk.js`      downloads reference DBs once (AniList 5000 anime incl. Arabic
+                          synonyms, TVMaze 80710 shows) and matches locally
+   - `train-genres.js`    trains a per-genre Naive Bayes on the 1209 titles that got real
+                          labels (title + description tokens, site categories, decade),
+                          picks per-genre between classifier / keyword rules / union by
+                          5-fold CV, then predicts the rest and adds the site's curated
+                          collections as facts
+
+   Measured on held-out folds: precision ~70%, recall ~54%, coverage 98% of the library.
    22 semantic genres + 2 date tags:
 
    `أكشن مغامرة كوميدي دراما خيال علمي فانتازيا غموض وتحقيق رعب رياضة مدرسي موسيقي

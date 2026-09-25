@@ -1,2 +1,7 @@
 node_modules/
 src/catalog-index.json
+src/ref-anilist.json
+src/ref-tvmaze.json
+src/meta-state.json
+src/meta-tmdb-state.json
+src/meta-tmdb.json
