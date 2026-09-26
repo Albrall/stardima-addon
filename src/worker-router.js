@@ -191,6 +191,45 @@ function genreMatches(slug, wanted) {
   return false;
 }
 
+// ---- versions: duplicate uploads merged into one entry -------------------
+function familyOf(slug) {
+  const F = INDEX.families || {};
+  if (F.families && F.families[slug]) return { primary: slug, fam: F.families[slug] };
+  const p = F.memberOf && F.memberOf[slug];
+  if (p && F.families && F.families[p]) return { primary: p, fam: F.families[p] };
+  return null;
+}
+function langLabel(slug) {
+  const l = ((INDEX.families || {}).lang || {})[slug];
+  return l === 'dub' ? '🇸🇦 مدبلج' : l === 'sub' ? 'E مترجم' : '';
+}
+function primarySlug(slug) {
+  const p = ((INDEX.families || {}).memberOf || {})[slug];
+  return p || slug;
+}
+function isAlias(slug) {
+  // memberOf maps every member (primary included, to itself) so lookups stay simple;
+  // an alias is a member that is NOT the primary of its family.
+  const m = (INDEX.families || {}).memberOf || {};
+  return !!m[slug] && m[slug] !== slug;
+}
+// For a family member, find the episode id of the *same* episode (season:episode)
+function memberEpisode(primary, memberSlug, season, episode) {
+  const map = ((INDEX.families || {}).epMap || {})[primary];
+  if (!map) return null;
+  const list = map[season + ':' + episode] || [];
+  const hit = list.find((x) => x[0] === memberSlug);
+  return hit ? hit[1] : null;
+}
+function keyOfEpisode(primary, slug, epId) {
+  const map = ((INDEX.families || {}).epMap || {})[primary];
+  if (!map) return null;
+  for (const k of Object.keys(map)) {
+    for (const [s, id] of map[k]) if (s === slug && String(id) === String(epId)) return k;
+  }
+  return null;
+}
+
 // ---- alphabetical catalog (embedded index + live newest pages) ------------
 const _cache = new Map();
 const FRESH_TTL = 15 * 60 * 1000; // 15 min
@@ -508,23 +547,38 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         hitS = { t: Date.now(), v: mergeSearch(site, q) };
         _cache.set(sc, hitS); // shared across catalog types and users
       }
-      const metas = hitS.v.filter(x => x.type === type).map(x => ({
-        id: 'stardima:' + (x.slug || x.id), type, name: x.title,
-        poster: x.poster || undefined, releaseInfo: x.year ? String(x.year) : undefined,
-      }));
+      const seenSearch = new Set();
+      const metas = [];
+      for (const x of hitS.v) {
+        if (x.type !== type) continue;
+        const id = 'stardima:' + primarySlug(x.slug || x.id); // duplicate uploads → one result
+        if (seenSearch.has(id)) continue;
+        seenSearch.add(id);
+        metas.push({
+          id, type, name: x.title,
+          poster: x.poster || undefined, releaseInfo: x.year ? String(x.year) : undefined,
+        });
+      }
       return json({ metas });
     }
 
     const key = type === 'series' ? 'series' : 'movies'; // the type segment is authoritative
     const toMeta = (it) => ({
-      id: 'stardima:' + it[0], type, name: it[1],
+      id: 'stardima:' + primarySlug(it[0]), type, name: it[1],
       poster: decodePoster(it[2]) || undefined,
       releaseInfo: it[3] || undefined,
     });
     if (id === 'stardima-new' || id === 'stardima-new-movies') {
-      return json({ metas: (await newestShelf(key)).map(toMeta) }); // site order = newest first
+      const seenNew = new Set(); const fresh = [];
+      for (const it of await newestShelf(key)) {
+        const ps = primarySlug(it[0]);
+        if (seenNew.has(ps)) continue;
+        seenNew.add(ps); fresh.push(it);
+      }
+      return json({ metas: fresh.map(toMeta) }); // site order = newest first
     }
     let sorted = await sortedItems(key);
+    sorted = sorted.filter((it) => !isAlias(it[0])); // duplicate uploads live under the primary entry
     if (extras.genre) sorted = sorted.filter((it) => genreMatches(it[0], extras.genre));
     if (extras.skip) { const sk = parseInt(extras.skip, 10) || 0; if (sk > 0) sorted = sorted.slice(sk); }
     const total = sorted.length;
@@ -555,14 +609,43 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     if (!meta) return notFound();
     meta.id = 'stardima:' + slug;
     const gs = genreBreakdown(slug); if (gs.length) meta.genres = gs;
+    // Show which versions this work has (dubbed / subbed / uncut …) on the entry itself.
+    const fm = familyOf(slug);
+    if (fm && fm.fam.members.length > 1) {
+      const langs = [...new Set(fm.fam.members.map((m) => (m.label || '').split(' · نسخة')[0]).filter(Boolean))];
+      const copies = fm.fam.members.length - langs.length;
+      const line = 'النسخ المتوفرة: ' + langs.join(' · ') + (copies > 0 ? (langs.length ? ' · ' : '') + copies + ' نسخة إضافية' : '');
+      meta.description = line + '\n' + (meta.description || '');
+    }
     let out;
     if (type === 'movie') {
       out = { meta: { ...meta, videos: undefined } };
     } else {
-      meta.videos = (meta.videos || []).map((v) => ({
-        ...v,
-        id: 'stardima:' + slug + ':' + (v.episodeId || String(v.id || '').split(':').pop()),
-      }));
+      const spine = fm ? fm.primary : slug;
+      const epMap = fm ? ((INDEX.families.epMap || {})[fm.primary] || {}) : {};
+      const own = new Map();
+      for (const v of meta.videos || []) own.set((v.season || 1) + ':' + (v.episode || 1), v);
+      const nb = (k) => k.split(':').map(Number);
+      const allKeys = [...new Set([...Object.keys(epMap), ...own.keys()])];
+      // the site occasionally stores a garbled episode number (e.g. 1920 instead of 19):
+      // park those at the end and label them as extras instead of "الحلقة 1920"
+      const weird = (k) => nb(k)[1] > 400;
+      const keys = allKeys.filter((k) => !weird(k)).sort((a, b) => {
+        const [as, ae] = nb(a); const [bs, be] = nb(b);
+        return as - bs || ae - be;
+      }).concat(allKeys.filter(weird).sort());
+      const epIdOf = (v) => v.episodeId || String(v.id || '').split(':').pop();
+      meta.videos = keys.map((k) => {
+        const sN = Number(k.split(':')[0]) || 1; const eN = Number(k.split(':')[1]) || 1;
+        const v = own.get(k);
+        if (v) return { ...v, id: 'stardima:' + spine + ':' + epIdOf(v) };
+        // episode exists only in another edition → play it from there
+        const list = epMap[k] || [];
+        const pick = list.find((x) => x[0] !== spine) || list[0];
+        if (!pick) return null;
+        const title = eN > 400 ? 'حلقة إضافية' : 'الحلقة ' + eN;
+        return { id: 'stardima:' + pick[0] + ':' + pick[1], title, season: sN, episode: eN, episodeId: pick[1] };
+      }).filter(Boolean);
       out = { meta };
     }
     _cache.set(ck, { t: Date.now(), v: out });
@@ -578,7 +661,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     if (type !== 'series' && type !== 'movie') return notFound();
     const parts = raw.split(':');
     const epId = parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1]) ? parts[parts.length - 1] : null;
-    const slug = parts[parts.length - 1];
+    const slug = epId ? parts.slice(0, -1).join(':') : parts[0];
     if (!epId && !slug) return json({ streams: [] });
 
     // Series with no episode chosen: fall back to the first one.
@@ -592,36 +675,64 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     }
     if (type === 'series' && !useEpId) return json({ streams: [] });
 
-    const ck = (useEpId ? 'servers:' + useEpId : 'movieServers:' + slug);
-    let ordered = null;
-    const hit = _cache.get(ck);
-    if (hit && Date.now() - hit.t < 10 * 60 * 1000) ordered = hit.v;
-    if (!ordered) {
-      let result;
-      try { result = useEpId ? await getServers(useEpId) : await getMovieServers(slug); }
-      catch (e) { return json({ streams: [] }); }
-      if (!result) return json({ streams: [] });
-      if (result.blocked) {
-        const msg = result.reason === 'login_required' ? 'يتطلب تسجيل الدخول' : 'يتطلب عضوية VIP';
-        return json({ streams: [{ name: NAME, title: msg, externalUrl: BASE + '/membership' }] });
+    // Which uploads of this work exist? (dubbed / subbed / uncut …)
+    const fam = familyOf(slug);
+    const targets = []; // [{ memberSlug, label, epId }]
+    if (fam) {
+      const seasonEpisode = useEpId ? keyOfEpisode(fam.primary, slug, useEpId) : null;
+      for (const m of fam.fam.members) {
+        if (fam.fam.sec !== 'series') {
+          // every movie upload is the full film — no episode map needed
+          targets.push({ memberSlug: m.slug, label: m.label, epId: null });
+          continue;
+        }
+        if (!seasonEpisode) continue;
+        const ep = memberEpisode(fam.primary, m.slug, seasonEpisode.split(':')[0], seasonEpisode.split(':')[1]);
+        if (ep) targets.push({ memberSlug: m.slug, label: m.label, epId: ep });
       }
-      // Working server first: rank by host reachability, then health-probe.
-      ordered = await orderServers(result.servers || [], {
-        maxProbe: 3,
-        waitUntil: (p) => { try { _ctx && _ctx.waitUntil(p); } catch (e) { /* no ctx */ } },
-      });
-      if (ordered.length) _cache.set(ck, { t: Date.now(), v: ordered });
     }
+    if (!targets.length) {
+      targets.push({ memberSlug: slug, label: langLabel(slug), epId: useEpId || null });
+    }
+
     const origin = url.origin;
-    return json({
-      streams: (ordered || []).map((srv) => ({
-        name: `${NAME} · ${srv.name}`,
-        title: `${srv.name}${srv.is_vip ? ' (VIP)' : ''}${DEAD_FROM_EDGE.test((srv.name || '') + ' ' + (srv.embedUrl || '')) ? ' (قد لا يعمل من السحابة)' : ''}`,
-        url: `${origin}/proxy/embed?u=${b64url(srv.embedUrl)}&n=${b64url(srv.name || '')}`,
-        behaviorHints: { notWebReady: true, bingeGroup: srv.name },
-      })),
-    });
+    const collected = [];
+    for (const t of targets) {
+      const ck = t.epId ? 'servers:' + t.epId : 'movieServers:' + t.memberSlug;
+      let list = null;
+      const hit = _cache.get(ck);
+      if (hit && Date.now() - hit.t < 10 * 60 * 1000) list = hit.v;
+      if (!list) {
+        let result;
+        try { result = t.epId ? await getServers(t.epId) : await getMovieServers(t.memberSlug); }
+        catch (e) { result = null; }
+        if (result && result.blocked) {
+          const msg = result.reason === 'login_required' ? 'يتطلب تسجيل الدخول' : 'يتطلب عضوية VIP';
+          collected.push({ name: NAME, title: msg, externalUrl: BASE + '/membership' });
+          continue;
+        }
+        list = await orderServers((result && result.servers) || [], {
+          maxProbe: 3,
+          waitUntil: (pr) => { try { _ctx && _ctx.waitUntil(pr); } catch (e) { /* no ctx */ } },
+        });
+        if (list.length) _cache.set(ck, { t: Date.now(), v: list });
+      }
+      for (const srv of (list || [])) {
+        const edgeDead = DEAD_FROM_EDGE.test((srv.name || '') + ' ' + (srv.embedUrl || ''));
+        const bits = [];
+        if (t.label) bits.push(t.label);
+        if (edgeDead) bits.push('قد لا يعمل من السحابة');
+        collected.push({
+          name: srv.name,
+          title: bits.length ? bits.join(' · ') : (srv.is_vip ? 'VIP' : srv.name),
+          url: `${origin}/proxy/embed?u=${b64url(srv.embedUrl)}&n=${b64url(srv.name || '')}`,
+          behaviorHints: { notWebReady: true, bingeGroup: (t.label || '') + '|' + srv.name },
+        });
+      }
+    }
+        return json({ streams: collected });
   }
+
 
   // /proxy/embed?u=<b64url embed> — resolve the host embed FRESH at playback time
   if (path === '/proxy/embed') {
