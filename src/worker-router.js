@@ -609,14 +609,8 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     if (!meta) return notFound();
     meta.id = 'stardima:' + slug;
     const gs = genreBreakdown(slug); if (gs.length) meta.genres = gs;
-    const fm = familyOf(slug);
-    // Dialect read from the poster the site uploads (مدبلج فصحى / مدبلج مصري …)
-    const dl = ((INDEX.dialect || {})[slug] || {}).dub;
-    if (dl && !(fm && fm.fam.members.length > 1)) {
-      const L = dl === 'masri' ? '🇪🇬 مصري' : dl === 'fusha' ? '🇸🇦 فصحى' : '🇸🇦 مدبلج';
-      meta.description = 'الدبلجة: ' + L + '\n' + (meta.description || '');
-    }
     // Show which versions this work has (dubbed / subbed / uncut …) on the entry itself.
+    const fm = familyOf(slug);
     if (fm && fm.fam.members.length > 1) {
       const langs = [...new Set(fm.fam.members.map((m) => (m.label || '').split(' · نسخة')[0]).filter(Boolean))];
       const copies = fm.fam.members.length - langs.length;

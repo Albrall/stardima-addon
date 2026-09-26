@@ -66,23 +66,12 @@ function jaccard(a, b) {
   let inter = 0; for (const t of a) if (b.has(t)) inter++;
   return inter / (a.size + b.size - inter);
 }
-let POSTER_LABELS = {};
-try {
-  POSTER_LABELS = JSON.parse(fs.readFileSync(path.join(__dirname, 'poster-labels.json'), 'utf8')).labels || {};
-} catch (e) { POSTER_LABELS = {}; }
-const DUB_LABEL = { fusha: '🇸🇦 فصحى', masri: '🇪🇬 مصري', arabi: '🇸🇦 مدبلج' };
-
 function labelFor(slug, title, lang) {
   const parts = [];
   for (const [re, label] of MARKERS) if (re.test(title)) parts.push(label);
-  // The poster the site uploads often says which dub it is (فصحى / مصري) — that beats guessing.
-  const pl = POSTER_LABELS[slug];
-  if (pl && DUB_LABEL[pl.dub] && !parts.some((p) => /فصحى|مصري|مدبلج/.test(p))) parts.push(DUB_LABEL[pl.dub]);
   const l = lang[slug];
   if (l === 'sub' && !parts.some((p) => /مترجم|فصيح|مصري/.test(p))) parts.push('E مترجم');
-  else if (l === 'dub' && !parts.some((p) => /مدبلج|فصيح|مصري|كاملة/.test(p))) {
-    parts.push(pl && DUB_LABEL[pl.dub] ? DUB_LABEL[pl.dub] : '🇸🇦 مدبلج');
-  }
+  else if (l === 'dub' && !parts.some((p) => /مدبلج|فصيح|مصري|كاملة/.test(p))) parts.push('🇸🇦 مدبلج');
   if (!parts.length) parts.push('نسخة');
   return [...new Set(parts)].join(' · ');
 }
