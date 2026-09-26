@@ -83,6 +83,40 @@ function proxiedRaw(origin, targetUrl, referer) {
   return `${origin}/proxy?u=${b64url(targetUrl)}&r=${b64url(referer || '')}`;
 }
 // Rewrite an m3u8 playlist so every URI routes back through this Worker.
+// Many hosts hand out a master playlist whose lowest rendition (360p) is what the
+// player picks first — on a tablet that looks like a blurry stream until it slowly
+// ramps up. We keep only the best rendition, so playback starts (and stays) at the
+// top quality the file actually has. `?q=auto` restores the untouched master.
+function forceBestVariant(playlistText) {
+  const lines = String(playlistText).split(/\r?\n/);
+  const blocks = [];
+  let pending = null;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith('#EXT-X-STREAM-INF')) { pending = { start: i, attrs: t }; continue; }
+    if (pending && t && !t.startsWith('#')) {
+      const res = /RESOLUTION=(\d+)x(\d+)/.exec(pending.attrs);
+      const bw = /BANDWIDTH=(\d+)/.exec(pending.attrs);
+      blocks.push({ start: pending.start, end: i, h: res ? Number(res[2]) : 0, kbps: bw ? Number(bw[1]) : 0 });
+      pending = null;
+    }
+  }
+  if (blocks.length < 2) return null; // single rendition (or a media playlist): nothing to pick
+  // Only pick between real video renditions — a master of audio-only tracks has nothing to choose.
+  if (!blocks.some((b) => b.h > 0)) return null;
+  let best = blocks[0];
+  for (const b of blocks) if (b.h > best.h || (b.h === best.h && b.kbps > best.kbps)) best = b;
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith('#EXT-X-STREAM-INF') || (t && !t.startsWith('#'))) {
+      if (i >= best.start && i <= best.end) out.push(lines[i]);
+      continue;
+    }
+    out.push(lines[i]);
+  }
+  return out.join('\n');
+}
 function rewriteM3u8(playlistText, playlistUrl, referer, origin) {
   const lines = String(playlistText).split(/\r?\n/);
   const out = [];
@@ -755,7 +789,9 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           const up = await fetchT(r.url, { headers: { 'User-Agent': UA, Referer: r.referer, Accept: '*/*' } }, 12000);
           lastStatus = up.status;
           if (!up.ok) continue; // try a fresh CDN edge
-          return playlistResponse(rewriteM3u8(await up.text(), r.url, r.referer, origin));
+          const txt = await up.text();
+          const rw = rewriteM3u8(txt, r.url, r.referer, origin);
+          return playlistResponse(url.searchParams.get('q') === 'auto' ? rw : (forceBestVariant(rw) || rw));
         }
         const hdrs = { 'User-Agent': UA, Referer: r.referer, Accept: '*/*' };
         const range = req.headers.get('range'); if (range) hdrs.Range = range;
@@ -783,7 +819,9 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       if (!up.ok) return textResponse('upstream ' + up.status, up.status);
       const ctype = up.headers.get('content-type') || '';
       if (/\.m3u8(\?|$)/i.test(target) || /mpegurl/i.test(ctype)) {
-        return playlistResponse(rewriteM3u8(await up.text(), target, referer, url.origin));
+        const txt2 = await up.text();
+        const rw2 = rewriteM3u8(txt2, target, referer, url.origin);
+        return playlistResponse(url.searchParams.get('q') === 'auto' ? rw2 : (forceBestVariant(rw2) || rw2));
       }
       return passthrough(up, req);
     } catch (e) {
