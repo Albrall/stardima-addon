@@ -480,7 +480,7 @@ function jcStreams(fresh, origin, label, group) {
 }
 
 // ---- manifest -------------------------------------------------------------
-function buildManifest(url) {
+async function buildManifest(url) {
   const mode = catalogMode(url);
   const arabicNum = (n) => String(n).replace(/\d/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
   const searchExtra = [{ name: 'search', isRequired: false }];
@@ -521,8 +521,12 @@ function buildManifest(url) {
       extra: searchExtra,
     });
   }
-  const sN = (((INDEX.series || {}).items) || []).filter((it) => !isAlias(it[0])).length + jcStandalone('series').length;
-  const mN = (((INDEX.movies || {}).items) || []).filter((it) => !isAlias(it[0])).length + jcStandalone('movies').length;
+  // counts come from the same lists the catalogues serve, so the description can never
+  // drift from what you actually see in the app
+  const sList = (await sortedItems('series')).filter((it) => !isAlias(it[0]));
+  const mList = (await sortedItems('movies')).filter((it) => !isAlias(it[0]));
+  const sN = sList.length + jcStandalone('series').length;
+  const mN = mList.length + jcStandalone('movies').length;
   return {
     id: ID, version: VERSION, name: NAME,
     description: 'مكتبة كرتون كاملة مرتبة أبجديًا — ' + sN + ' مسلسل و' + mN + ' فيلم، مع الحلقات وبث مباشر',
@@ -653,7 +657,7 @@ async function handleRequest(url, req, ctx) {
   if (path.endsWith('.json')) path = path.slice(0, -5);
 
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
-  if (path === '/manifest.json' || path === '/manifest') { maybeSelfCheck(_ctx); return json(buildManifest(url)); }
+  if (path === '/manifest.json' || path === '/manifest') { maybeSelfCheck(_ctx); return json(await buildManifest(url)); }
   if (path === '/' || path === '/configure') {
     return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${NAME}</title>
