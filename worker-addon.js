@@ -778,6 +778,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         genres: ['جي كرتون', it.genre].filter(Boolean),
       } });
     }
+    const slug = decodeURIComponent(m[2]).replace(/^stardima:/, '').split(':')[0];
     const ck = 'meta:' + type + ':' + slug;
     const hit = _cache.get(ck);
     if (hit && Date.now() - hit.t < 30 * 60 * 1000) return json(hit.v);
