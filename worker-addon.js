@@ -367,6 +367,44 @@ function jcSeries() { return (INDEX.jcartoon && INDEX.jcartoon.series) || []; }
 function jcMovies() { return (INDEX.jcartoon && INDEX.jcartoon.movies) || []; }
 function jcSeriesOf(id) { return jcSeries().find((x) => x.id === id) || null; }
 function jcMovieOf(id) { return jcMovies().find((x) => x.id === id) || null; }
+// Stremio/Nuvio expect a series episode id to end with ":<season>:<episode>" — the app
+// parses those two numbers to build its menus, and asks /meta with the same id when it
+// resumes. Our first cut ended the id with the episode UUID, so Nuvio could not read it
+// and answered "no addon provides meta for this". Every id shape is accepted now:
+//   jcseries-<uuid>[:<season>:<episode>]   (current)
+//   jcseries-<uuid>:<episodeUUID>          (episode picked by id)
+//   jcartoon-s:<uuid>[...] / jcartoon:<uuid> / jcartoon-<uuid>   (older builds)
+function jcResolve(raw) {
+  const s = String(raw || '');
+  if (s.startsWith('jcseries-')) {
+    const parts = s.slice('jcseries-'.length).split(':');
+    return { kind: 'series', id: parts[0], tail: parts.slice(1) };
+  }
+  if (s.startsWith('jcartoon-s:')) {
+    const parts = s.slice('jcartoon-s:'.length).split(':');
+    return { kind: 'series', id: parts[0], tail: parts.slice(1) };
+  }
+  if (s.startsWith('jcartoon-')) return { kind: 'movie', id: s.slice('jcartoon-'.length), tail: [] };
+  if (s.startsWith('jcartoon:')) return { kind: 'movie', id: s.slice('jcartoon:'.length), tail: [] };
+  return null;
+}
+// pick the episode a resolved id points at: by season+episode numbers, else by episode id
+function jcPickEpisode(series, tail) {
+  const eps = (series && series.episodes) || [];
+  if (!eps.length) return null;
+  if (tail.length >= 2) {
+    const season = Number(tail[tail.length - 2]);
+    const ep = Number(tail[tail.length - 1]);
+    if (isFinite(season) && isFinite(ep)) {
+      let hit = eps.find((e) => Number(e[1]) === ep && Number(e[2] || 1) === season);
+      if (!hit) hit = eps.find((e) => Number(e[1]) === ep);   // their seasons are unreliable
+      if (hit) return hit;
+    }
+  }
+  const last = tail[tail.length - 1];
+  if (last) return eps.find((e) => e[0] === last) || null;
+  return eps[0];
+}
 function jcMapMovie(slug) { const m = INDEX.jcartoon && INDEX.jcartoon.map; return m ? m[slug] : null; }
 function jcMapSeries(slug) { const m = INDEX.jcartoon && INDEX.jcartoon.smap; return m ? m[slug] : null; }
 function jcHdr() { return { 'User-Agent': UA, Accept: 'application/json', Referer: 'https://jcartoon.top/' }; }
@@ -653,7 +691,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       let list = jcMovies();
       if (q) { const nq = normTitle(q); list = list.filter((x) => normTitle(x.title).indexOf(nq) >= 0); }
       return json({ metas: list.map((x) => ({
-        id: 'jcartoon:' + x.id, type: 'movie', name: x.title,
+        id: 'jcartoon-' + x.id, type: 'movie', name: x.title,
         poster: x.poster || undefined, description: x.desc || undefined,
       })) });
     }
@@ -662,7 +700,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       let list = jcSeries();
       if (q) { const nq = normTitle(q); list = list.filter((x) => normTitle(x.title).indexOf(nq) >= 0); }
       return json({ metas: list.map((x) => ({
-        id: 'jcartoon-s:' + x.id, type: 'series', name: x.title,
+        id: 'jcseries-' + x.id, type: 'series', name: x.title,
         poster: x.poster || undefined,
         description: (x.desc ? x.desc + '\n' : '') + `عدد الحلقات: ${x.total}`,
       })) });
@@ -707,30 +745,39 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const m = /^\/meta\/([^/]+)\/([^/]+)$/.exec(path);
     if (!m) return notFound();
     const type = m[1];
-    if (decodeURIComponent(m[2]).startsWith('jcartoon-s:')) {
-      const it = jcSeriesOf(decodeURIComponent(m[2]).slice('jcartoon-s:'.length));
+    const jcm = jcResolve(decodeURIComponent(m[2]));
+    if (jcm) {
+      if (jcm.kind === 'series') {
+        const it = jcSeriesOf(jcm.id);
+        if (!it) return notFound();
+        const videos = (it.episodes || []).map((e, i) => ({
+          // standard shape: <metaId>:<season>:<episode> — Nuvio parses these numbers
+          id: 'jcseries-' + it.id + ':' + (e[2] || 1) + ':' + (e[1] || i + 1),
+          title: 'الحلقة ' + (e[1] || i + 1),
+          season: e[2] || 1, episode: e[1] || i + 1, episodeId: e[0],
+        }));
+        return json({ meta: {
+          id: 'jcseries-' + it.id, type: 'series', name: it.title,
+          poster: it.poster || undefined, description: it.desc || undefined,
+          genres: ['جي كرتون', it.genre].filter(Boolean), videos,
+        } });
+      }
+      const it = jcMovieOf(jcm.id) || jcSeriesOf(jcm.id); // be forgiving about type mix-ups
       if (!it) return notFound();
-      const videos = (it.episodes || []).map((e, i) => ({
-        id: 'jcartoon-s:' + it.id + ':' + e[0],
-        title: 'الحلقة ' + (e[1] || i + 1),
-        season: e[2] || 1, episode: e[1] || i + 1, episodeId: e[0],
-      }));
+      if (it.episodes) {
+        const videos = (it.episodes || []).map((e, i) => ({
+          id: 'jcseries-' + it.id + ':' + (e[2] || 1) + ':' + (e[1] || i + 1),
+          title: 'الحلقة ' + (e[1] || i + 1),
+          season: e[2] || 1, episode: e[1] || i + 1, episodeId: e[0],
+        }));
+        return json({ meta: { id: 'jcseries-' + it.id, type: 'series', name: it.title, poster: it.poster || undefined, description: it.desc || undefined, genres: ['جي كرتون', it.genre].filter(Boolean), videos } });
+      }
       return json({ meta: {
-        id: 'jcartoon-s:' + it.id, type: 'series', name: it.title,
-        poster: it.poster || undefined, description: it.desc || undefined,
-        genres: ['جي كرتون', it.genre].filter(Boolean), videos,
-      } });
-    }
-    if (decodeURIComponent(m[2]).startsWith('jcartoon:')) {
-      const it = jcMovieOf(decodeURIComponent(m[2]).slice('jcartoon:'.length));
-      if (!it) return notFound();
-      return json({ meta: {
-        id: 'jcartoon:' + it.id, type: 'movie', name: it.title,
+        id: 'jcartoon-' + it.id, type: 'movie', name: it.title,
         poster: it.poster || undefined, description: it.desc || undefined,
         genres: ['جي كرتون', it.genre].filter(Boolean),
       } });
     }
-    const slug = decodeURIComponent(m[2]).replace(/^stardima:/, '').split(':')[0];
     const ck = 'meta:' + type + ':' + slug;
     const hit = _cache.get(ck);
     if (hit && Date.now() - hit.t < 30 * 60 * 1000) return json(hit.v);
@@ -786,21 +833,29 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const m = /^\/stream\/([^/]+)\/([^/]+)$/.exec(path);
     if (!m) return notFound();
     const type = m[1];
-    if (decodeURIComponent(m[2]).startsWith('jcartoon-s:')) {
-      const rest = decodeURIComponent(m[2]).slice('jcartoon-s:'.length);
-      const bits = rest.split(':');
-      const epId = bits[bits.length - 1];
-      const fresh = await jcUrlForEpisode(epId);
-      if (!fresh) return json({ streams: [] });
-      return json({ streams: jcStreams(fresh, url.origin, 'حلقة كاملة ١٩٢٠×١٠٨٠', 'jcartoon') });
-    }
-    if (decodeURIComponent(m[2]).startsWith('jcartoon:')) {
-      const id = decodeURIComponent(m[2]).slice('jcartoon:'.length);
-      const it = jcMovieOf(id);
+    const jcs = jcResolve(decodeURIComponent(m[2]));
+    if (jcs) {
+      if (jcs.kind === 'movie') {
+        const it = jcMovieOf(jcs.id);
+        if (it) {
+          const fresh = await jcUrlForMovie(it.id);
+          if (!fresh) return json({ streams: [] });
+          return json({ streams: jcStreams(fresh, url.origin, it.title + ' — ١٩٢٠×١٠٨٠', 'jcartoon') });
+        }
+        const alt = jcSeriesOf(jcs.id);            // it may be a series listed as a film
+        if (!alt) return notFound();
+        const ep0 = jcPickEpisode(alt, []);
+        const fresh0 = ep0 ? await jcUrlForEpisode(ep0[0]) : null;
+        if (!fresh0) return json({ streams: [] });
+        return json({ streams: jcStreams(fresh0, url.origin, alt.title + ' — ١٩٢٠×١٠٨٠', 'jcartoon') });
+      }
+      const it = jcSeriesOf(jcs.id);
       if (!it) return notFound();
-      const fresh = await jcUrlForMovie(it.id);
+      const ep = jcPickEpisode(it, jcs.tail);
+      if (!ep) return json({ streams: [] });
+      const fresh = await jcUrlForEpisode(ep[0]);
       if (!fresh) return json({ streams: [] });
-      return json({ streams: jcStreams(fresh, url.origin, it.title + ' — ١٩٢٠×١٠٨٠', 'jcartoon') });
+      return json({ streams: jcStreams(fresh, url.origin, 'الحلقة ' + (ep[1] || '') + ' بجودة ١٩٢٠×١٠٨٠', 'jcartoon') });
     }
     const raw = decodeURIComponent(m[2]).replace(/^stardima:/, '');
     if (type !== 'series' && type !== 'movie') return notFound();
