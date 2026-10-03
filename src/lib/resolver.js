@@ -146,7 +146,26 @@ async function orderServers(servers, opts = {}) {
     .map((s, i) => ({ s, i, rank: hostRank(s) + healthPenalty(s) }))
     .sort((a, b) => a.rank - b.rank || a.i - b.i);
   const out = ranked.map((x) => x.s);
-  const jobs = probeServers(out, opts.maxProbe || 3); // best-effort, never awaited
+  const jobs = probeServers(out, opts.maxProbe || 4);
+  if (opts.verifyBudget) {
+    // wait a moment for the probes, then put the ones that answered first — this is what
+    // stops the player from opening a dead host and making you tap three servers
+    try {
+      await Promise.race([
+        Promise.all(jobs),
+        new Promise((r) => setTimeout(r, opts.verifyBudget)),
+      ]);
+      const rank = (srv) => {
+        const h = _health.get(hostKeyOf(srv));
+        if (!h) return 1;               // unknown → middle
+        return h.ok ? 0 : 2;            // verified → first, known-failed → last
+      };
+      return out
+        .map((s, i) => ({ s, i, r: rank(s) }))
+        .sort((a, b) => a.r - b.r || a.i - b.i)
+        .map((x) => x.s);
+    } catch (e) { /* fall through to the instant order */ }
+  }
   if (opts.waitUntil) { try { opts.waitUntil(Promise.all(jobs)); } catch (e) { /* no ctx */ } }
   return out;
 }

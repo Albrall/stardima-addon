@@ -45,26 +45,5 @@ const norm = (s) => String(s || '').normalize('NFKC').replace(/[أإآ]/g, 'ا')
   console.log(`  مسلسلات قابلة للتشغيل: ${sUniq.length} (حلقاتها ${eps}) · أفلام: ${mUniq.length}`);
   console.log('  أمثلة:', sUniq.slice(0, 6).map((x) => `${x.title} (${x.total})`).join(' · '));
 
-  // mirror the map used to put their 1080p copy on top of a matching Stardima movie
-  const idx = JSON.parse(fs.readFileSync(path.join(__dirname, 'catalog-index.min.json'), 'utf8'));
-  const ours = [];
-  for (const k of ['series', 'movies']) for (const it of idx[k].items) ours.push({ slug: it[0], title: it[1], kind: k === 'movies' ? 'movie' : 'series' });
-  const byN = new Map();
-  for (const o of ours) if (!byN.has(norm(o.title))) byN.set(norm(o.title), o);
-  const map = {};
-  for (const it of [...mUniq].map((x) => ({ ...x, kind: 'movie' }))) {
-    const o = byN.get(norm(it.title));
-    if (o) map[o.slug] = { id: it.id, title: it.title, kind: it.kind, movieId: it.id };
-  }
-  fs.writeFileSync(path.join(__dirname, 'jc-map.json'), JSON.stringify({ note: 'stardima slug → jcartoon movie (exact title match)', items: map }));
-  console.log(`  ربط مع أفلامنا: ${Object.keys(map).length}`);
-
-  // same idea for series: map by exact title, then the worker can serve episode N from them
-  const smap = {};
-  for (const s of sUniq) {
-    const o = byN.get(norm(s.title));
-    if (o && o.kind === 'series') smap[o.slug] = { id: s.id, title: s.title, total: s.episodes.length };
-  }
-  fs.writeFileSync(path.join(__dirname, 'jc-smap.json'), JSON.stringify({ note: 'stardima series slug → jcartoon series (exact title match)', items: smap }));
-  console.log(`  ربط مع مسلسلاتنا: ${Object.keys(smap).length}`);
+  // maps are produced by build-jc-match.js (stricter + fuzzy title matching)
 })();

@@ -356,6 +356,17 @@ function chunkCount(key) {
 // Their API signs a fresh HLS link per request, so nothing is cached here: the
 // addon asks jcartoon for a link the moment you press play, exactly like the
 // site does. Entries are single videos (films / specials), served as movie type.
+function qOf(slug) {
+  const q = INDEX.quality && INDEX.quality.items && INDEX.quality.items[slug];
+  return q && q.h ? q.h : 0;
+}
+function relInfo(year, h) {
+  const bits = [];
+  if (year) bits.push(String(year));
+  if (h) bits.push(h + 'p');
+  return bits.length ? bits.join(' · ') : undefined;
+}
+
 function jcSeries() { return (INDEX.jcartoon && INDEX.jcartoon.series) || []; }
 function jcMovies() { return (INDEX.jcartoon && INDEX.jcartoon.movies) || []; }
 function jcSeriesOf(id) { return jcSeries().find((x) => x.id === id) || null; }
@@ -445,7 +456,14 @@ function buildManifest(url) {
     movies.push({ id: 'stardima-new-movies', type: 'movie', name: `${NAME}: أحدث الأفلام`, extra: searchExtra });
     movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: أفلام (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
     // مصدر ثانٍ: jcartoon.top — كل عنصر فيه فيديو واحد بجودة FULL HD
-    if (jcMovies().length) movies.push({ id: 'jcartoon', type: 'movie', name: `جي كرتون: أفلام ١٠٨٠p (${arabicNum(jcMovies().length)})`, extra: [...searchExtra] });
+    if ((((INDEX.quality || {}).items) && Object.keys(INDEX.quality.items).length)) {
+    const qs = INDEX.quality.items;
+    const hdS = (((INDEX.series || {}).items) || []).filter((it) => qs[it[0]] && qs[it[0]].h >= 720).length;
+    const hdM = (((INDEX.movies || {}).items) || []).filter((it) => qs[it[0]] && qs[it[0]].h >= 720).length;
+    if (hdS) series.push({ id: 'stardima-hd', type: 'series', name: `${NAME}: ٧٢٠p فأعلى (${arabicNum(hdS)})`, extra: [...searchExtra] });
+    if (hdM) movies.push({ id: 'stardima-hd-movies', type: 'movie', name: `${NAME}: أفلام ٧٢٠p فأعلى (${arabicNum(hdM)})`, extra: [...searchExtra] });
+  }
+  if (jcMovies().length) movies.push({ id: 'jcartoon', type: 'movie', name: `جي كرتون: أفلام ١٠٨٠p (${arabicNum(jcMovies().length)})`, extra: [...searchExtra] });
   if (jcSeries().length) series.push({ id: 'jcartoon-series', type: 'series', name: `جي كرتون: مسلسلات ١٠٨٠p (${arabicNum(jcSeries().length)})`, extra: [...searchExtra] });
   } else {
     const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
@@ -518,6 +536,23 @@ async function selfCheck() {
     const j = await getJson(BASE + '/mosalsalat?page=1');
     out.checks.site = { ok: ((j.videos) || []).length > 0, rows: ((j.videos) || []).length };
   } catch (e) { out.checks.site = { ok: false, error: String((e && e.message) || e).slice(0, 100) }; }
+  // 1b) the second source (jcartoon) — cheap ping, cached five minutes
+  try {
+    const hk = 'health:jcartoon';
+    let c = _cache.get(hk);
+    if (!c || Date.now() - c.t > 5 * 60 * 1000) {
+      let v;
+      try {
+        const r = await fetchT('https://jcartoon.top/api/series?limit=1', { headers: { 'User-Agent': UA, Accept: 'application/json', Referer: 'https://jcartoon.top/' } }, 8000);
+        const j = r.ok ? await r.json() : null;
+        v = { ok: !!(j && j.series), items: ((j && j.series) || []).length };
+      } catch (e) { v = { ok: false, error: String((e && e.message) || e).slice(0, 80) }; }
+      c = { t: Date.now(), v }; _cache.set(hk, c);
+    }
+    out.checks.jcartoon = c.v;
+    if (!c.v.ok) ok = false;
+  } catch (e) { out.checks.jcartoon = { ok: false }; }
+
   // 2) catalog from the embedded index
   try {
     const arr = await sortedItems('series');
@@ -663,16 +698,48 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         hitS = { t: Date.now(), v: mergeSearch(site, q) };
         _cache.set(sc, hitS); // shared across catalog types and users
       }
-      const seenSearch = new Set();
-      const metas = [];
+      // one row per work: their 1080p copy wins only when we have no series for it
+      const jcHits = [];
+      if (type === 'series') {
+        const nq = normTitle(q);
+        for (const x of jcSeries()) if (normTitle(x.title).indexOf(nq) >= 0) jcHits.push({ id: 'jcseries-' + x.id, type: 'series', title: x.title, poster: x.poster, jc: true, eps: (x.episodes || []).length });
+      } else {
+        const nq = normTitle(q);
+        for (const x of jcMovies()) if (normTitle(x.title).indexOf(nq) >= 0) jcHits.push({ id: 'jcartoon-' + x.id, type: 'movie', title: x.title, poster: x.poster, jc: true });
+      }
+      const merged = [];
+      const stardimaByTitle = new Map();
+      for (const x of hitS.v) if (x.type === type) {
+        const k = normTitle(x.title);
+        if (!stardimaByTitle.has(k)) stardimaByTitle.set(k, x);
+      }
+      const seenTitles = new Set();
       for (const x of hitS.v) {
         if (x.type !== type) continue;
-        const id = 'stardima:' + primarySlug(x.slug || x.id); // duplicate uploads → one result
+        const k = normTitle(x.title);
+        if (seenTitles.has(k)) continue;
+        seenTitles.add(k);
+        const jcSame = jcHits.find((j) => normTitle(j.title) === k);
+        // a series in our library still wins (it carries the episode list); otherwise the
+        // 1080p copy from jcartoon takes the row
+        if (jcSame && type === 'movie') { merged.push(jcSame); } else { merged.push(x); }
+      }
+      for (const j of jcHits) {
+        const k = normTitle(j.title);
+        if (stardimaByTitle.has(k)) continue;
+        merged.push(j);
+      }
+      const seenSearch = new Set();
+      const metas = [];
+      for (const x of merged) {
+        const id = x.jc ? x.id : 'stardima:' + primarySlug(x.slug || x.id); // duplicate uploads → one result
         if (seenSearch.has(id)) continue;
         seenSearch.add(id);
         metas.push({
           id, type, name: x.title,
-          poster: x.poster || undefined, releaseInfo: x.year ? String(x.year) : undefined,
+          poster: x.poster || undefined,
+          releaseInfo: relInfo(x.year, x.jc ? 1080 : qOf(primarySlug(x.slug || x.id))),
+          description: x.jc ? 'جي كرتون — جودة ١٩٢٠×١٠٨٠' : undefined,
         });
       }
       return json({ metas });
@@ -700,11 +767,27 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     }
 
     const key = type === 'series' ? 'series' : 'movies'; // the type segment is authoritative
-    const toMeta = (it) => ({
-      id: 'stardima:' + primarySlug(it[0]), type, name: it[1],
-      poster: decodePoster(it[2]) || undefined,
-      releaseInfo: it[3] || undefined,
-    });
+    const toMeta = (it) => {
+      const ps = primarySlug(it[0]);
+      return {
+        id: 'stardima:' + ps, type, name: it[1],
+        poster: decodePoster(it[2]) || undefined,
+        releaseInfo: relInfo(it[3], qOf(ps) || qOf(it[0])),
+      };
+    };
+    // measured-quality shelf: everything we probed at 720p or better, best first
+    if (id === 'stardima-hd' || id === 'stardima-hd-movies') {
+      const key = id === 'stardima-hd' ? 'series' : 'movies';
+      const qs = (INDEX.quality && INDEX.quality.items) || {};
+      const rows = (((INDEX[key] || {}).items) || [])
+        .map((it) => ({ it, h: qs[it[0]] ? qs[it[0]].h : 0 }))
+        .filter((x) => x.h >= 720)
+        .sort((a, b) => b.h - a.h || byTitleAr(a.it[1], b.it[1]));
+      const q = (extras.search || '').trim();
+      const filtered = q ? rows.filter((x) => normTitle(x.it[1]).indexOf(normTitle(q)) >= 0) : rows;
+      return json({ metas: filtered.map((x) => toMeta(x.it)) });
+    }
+
     if (id === 'stardima-new' || id === 'stardima-new-movies') {
       const seenNew = new Set(); const fresh = [];
       for (const it of await newestShelf(key)) {
@@ -779,6 +862,8 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     if (!meta) return notFound();
     meta.id = 'stardima:' + slug;
     const gs = genreBreakdown(slug); if (gs.length) meta.genres = gs;
+    const qh = qOf(slug);
+    if (qh) meta.description = `الجودة الحقيقية: ${qh}p\n` + (meta.description || '');
     // Show which versions this work has (dubbed / subbed / uncut …) on the entry itself.
     const fm = familyOf(slug);
     if (fm && fm.fam.members.length > 1) {
@@ -909,7 +994,18 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
             if (v) epNo = v.episode || null;
           } catch (e) { /* fall through */ }
         }
-        const jcEp = jcS && epNo != null ? (jcS.episodes || []).find((e) => String(e[1]) === String(epNo)) : null;
+        // a fuzzy title match (their "Slugterra Ascension" vs our "Slugterra") must not
+        // swap in a different season/edition: episode counts have to line up
+        let fuzzyOk = true;
+        if (jcS && seriesHit.how && seriesHit.how.indexOf('fuzzy') === 0) {
+          try {
+            const mm2 = await getSeriesMeta(slug);
+            const ours = ((mm2 && mm2.videos) || []).length;
+            const theirs = (jcS.episodes || []).length;
+            fuzzyOk = ours > 0 && theirs > 0 && Math.abs(ours - theirs) <= 1;
+          } catch (e) { fuzzyOk = false; }
+        }
+        const jcEp = (jcS && fuzzyOk && epNo != null) ? (jcS.episodes || []).find((e) => String(e[1]) === String(epNo)) : null;
         if (jcEp) {
           const fresh = await jcUrlForEpisode(jcEp[0]);
           if (fresh) jcFirst.push(...jcStreams(fresh, url.origin, 'الحلقة ' + epNo + ' بجودة ١٩٢٠×١٠٨٠', 'jcartoon'));
@@ -934,7 +1030,8 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           continue;
         }
         list = await orderServers((result && result.servers) || [], {
-          maxProbe: 3,
+          maxProbe: 4,
+          verifyBudget: 1500, // wait briefly so the server list comes back verified
           waitUntil: (pr) => { try { _ctx && _ctx.waitUntil(pr); } catch (e) { /* no ctx */ } },
         });
         if (list.length) _cache.set(ck, { t: Date.now(), v: list });
