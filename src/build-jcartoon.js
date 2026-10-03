@@ -1,76 +1,70 @@
-// Builds the jcartoon.top source for the addon.
-// Their API is clean REST; every playable entry there is a single video (film / special)
-// served as 1080p HLS. Tokens are signed per request, so we never store stream URLs —
-// we store the API route and fetch a fresh one at playback time.
+// Builds the jcartoon.top source for the addon from a full scan (/tmp/jc-full.json),
+// because their episodeCount field lies: hundreds of series report 0 episodes yet
+// serve real episodes. Every entry kept here is one we probed and saw a live .m3u8.
 const fs = require('fs');
 const path = require('path');
 
-const J = 'https://jcartoon.top';
 const OUT = path.join(__dirname, 'jcartoon.json');
+const SRC = process.env.JC_FULL || '/tmp/jc-full.json';
 
-async function api(p, tries = 3) {
-  for (let i = 0; i < tries; i++) {
-    try {
-      const r = await fetch(J + p, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json', Referer: J + '/' } });
-      if (!r.ok) throw new Error('http ' + r.status);
-      return await r.json();
-    } catch (e) {
-      await new Promise((s) => setTimeout(s, 800));
-    }
-  }
-  return null;
-}
-const probe = async (u) => {
-  try { const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(20000) }); return r.ok; }
-  catch (e) { return false; }
-};
+const norm = (s) => String(s || '').normalize('NFKC').replace(/[أإآ]/g, 'ا').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
 
 (async () => {
-  const series = (await api('/api/series'))?.series || [];
-  const movies = (await api('/api/movies'))?.movies || [];
-  const channels = (await api('/api/channels'))?.channels || [];
-  console.log(`  من عندهم: ${series.length} مسلسل · ${movies.length} فيلم · ${channels.length} قناة`);
-
-  const items = [];
-  const withEps = series.filter((x) => (x.episodeCount || 0) > 0);
-  for (const s of withEps) {
-    const eps = (await api('/api/series/' + s.id + '/episodes'))?.episodes || [];
-    if (!eps.length) continue;
-    const e = eps[0];
-    const man = await api('/api/episode/' + e.id + '/download-manifest');
-    const tok = man?.qualities?.[0]?.playlistToken;
-    if (!tok) continue;
-    let url; try { url = Buffer.from(tok, 'base64url').toString(); } catch (err) { continue; }
-    if (!(await probe(url))) continue; // token stale → their stream is down for this title
-    items.push({
-      id: 's:' + s.id, kind: 'series', seriesId: s.id, episodeId: e.id,
-      title: s.arabicTitle || s.title, poster: s.poster || '', backdrop: s.backdrop || '',
-      desc: (s.description || '').slice(0, 500), genre: s.genre || '', year: s.year || '',
-      duration: e.duration || 0, episodes: eps.length,
+  const raw = JSON.parse(fs.readFileSync(SRC, 'utf8'));
+  // Their /api/movies entries are the same ids that also appear under /api/series
+  // (61 of them), so an id that is a film must not land in the series catalogue.
+  const movieIds = new Set((raw.movies || []).filter((m) => m.probed_ok).map((m) => m.id));
+  const series = [], movies = [];
+  for (const s of raw.series || []) {
+    if (!s.probed_ok || !(s.episodes || []).length) continue;
+    if (movieIds.has(s.id)) continue; // it is a film, listed below
+    series.push({
+      id: s.id, title: s.title, poster: s.poster || '', desc: (s.desc || '').slice(0, 220), genre: s.genre || '',
+      total: s.episodes.length,
+      // compact: [episodeId, index, season, duration] — 13k episodes inline would bloat the worker
+      episodes: s.episodes.map((e) => [e.id, e.index || 0, e.seasonNumber || 0, e.duration || 0]),
     });
   }
-  for (const m of movies) {
-    const d = await api('/api/movie/' + m.id + '/stream');
-    const url = d?.playUrl;
-    if (!url || !(await probe(url))) continue;
-    items.push({
-      id: 'm:' + m.id, kind: 'movie', movieId: m.id,
-      title: m.arabicTitle || m.title, poster: m.poster || m.posterUrl || '', backdrop: m.backdrop || '',
-      desc: (m.description || '').slice(0, 500), genre: m.genre || '', year: m.year || '',
-      duration: m.duration || 0, episodes: 1,
-    });
+  for (const m of raw.movies || []) {
+    if (!m.probed_ok) continue;
+    movies.push({ id: m.id, title: m.title, poster: m.poster || '', desc: m.desc || '', genre: m.genre || '' });
   }
-  // de-dup by title (their API lists some films twice)
-  const seen = new Set(); const uniq = [];
-  for (const it of items) { const k = it.title.trim(); if (seen.has(k)) continue; seen.add(k); uniq.push(it); }
+  // a title can appear in both endpoints (their films are listed as "series" too)
+  const seen = new Set();
+  const sUniq = series.filter((x) => { const k = norm(x.title); if (seen.has(k)) return false; seen.add(k); return true; });
+  const mUniq = movies.filter((x) => { const k = norm(x.title); if (seen.has(k)) return false; seen.add(k); return true; });
 
+  const channels = JSON.parse(fs.readFileSync(path.join(__dirname, 'jcartoon.json'), 'utf8')).channels || [];
   const out = {
     built: new Date().toISOString(),
-    note: 'jcartoon.top — كل عنصر هنا فيديو واحد بجودة FULL HD 1080p. الروابط موقّعة وتُطلب لحظيًا.',
-    items: uniq,
-    channels: channels.map((c) => ({ name: c.name, type: c.type, logo: c.logo || '', url: c.streamUrl || '' })),
+    note: 'jcartoon.top — مسلسلات وأفلام بجودة FULL HD 1080p. الروابط موقّعة تُطلب لحظيًا عند التشغيل.',
+    series: sUniq, movies: mUniq, channels,
   };
   fs.writeFileSync(OUT, JSON.stringify(out));
-  console.log(`  قابل للتشغيل الآن: ${uniq.length} عمل (مكرر مستبعد: ${items.length - uniq.length}) · قنوات: ${out.channels.length}`);
-  console.log('  نماذج:', uniq.slice(0, 5).map((x) => x.title + ' (' + (x.duration || 0) + 'ث)').join(' · '));
+  const eps = sUniq.reduce((n, x) => n + x.episodes.length, 0);
+  console.log(`  مسلسلات قابلة للتشغيل: ${sUniq.length} (حلقاتها ${eps}) · أفلام: ${mUniq.length}`);
+  console.log('  أمثلة:', sUniq.slice(0, 6).map((x) => `${x.title} (${x.total})`).join(' · '));
+
+  // mirror the map used to put their 1080p copy on top of a matching Stardima movie
+  const idx = JSON.parse(fs.readFileSync(path.join(__dirname, 'catalog-index.min.json'), 'utf8'));
+  const ours = [];
+  for (const k of ['series', 'movies']) for (const it of idx[k].items) ours.push({ slug: it[0], title: it[1], kind: k === 'movies' ? 'movie' : 'series' });
+  const byN = new Map();
+  for (const o of ours) if (!byN.has(norm(o.title))) byN.set(norm(o.title), o);
+  const map = {};
+  for (const it of [...mUniq].map((x) => ({ ...x, kind: 'movie' }))) {
+    const o = byN.get(norm(it.title));
+    if (o) map[o.slug] = { id: it.id, title: it.title, kind: it.kind, movieId: it.id };
+  }
+  fs.writeFileSync(path.join(__dirname, 'jc-map.json'), JSON.stringify({ note: 'stardima slug → jcartoon movie (exact title match)', items: map }));
+  console.log(`  ربط مع أفلامنا: ${Object.keys(map).length}`);
+
+  // same idea for series: map by exact title, then the worker can serve episode N from them
+  const smap = {};
+  for (const s of sUniq) {
+    const o = byN.get(norm(s.title));
+    if (o && o.kind === 'series') smap[o.slug] = { id: s.id, title: s.title, total: s.episodes.length };
+  }
+  fs.writeFileSync(path.join(__dirname, 'jc-smap.json'), JSON.stringify({ note: 'stardima series slug → jcartoon series (exact title match)', items: smap }));
+  console.log(`  ربط مع مسلسلاتنا: ${Object.keys(smap).length}`);
 })();

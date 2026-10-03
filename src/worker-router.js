@@ -356,22 +356,19 @@ function chunkCount(key) {
 // Their API signs a fresh HLS link per request, so nothing is cached here: the
 // addon asks jcartoon for a link the moment you press play, exactly like the
 // site does. Entries are single videos (films / specials), served as movie type.
-function jcItems() { return (INDEX.jcartoon && INDEX.jcartoon.items) || []; }
-function jcFind(id) {
-  const raw = String(id || '').replace(/^jcartoon:/, '');
-  return jcItems().find((x) => x.id === raw) || null;
-}
-async function jcFreshUrl(item) {
-  const hdr = { 'User-Agent': UA, Accept: 'application/json', Referer: 'https://jcartoon.top/' };
-  if (item.kind === 'movie') {
-    const r = await fetchT('https://jcartoon.top/api/movie/' + item.movieId + '/stream', { headers: hdr }, 12000);
-    if (!r.ok) return null;
-    const j = await r.json();
-    return j && j.playUrl ? j.playUrl : null;
-  }
-  const r = await fetchT('https://jcartoon.top/api/episode/' + item.episodeId + '/download-manifest', { headers: hdr }, 12000);
+function jcSeries() { return (INDEX.jcartoon && INDEX.jcartoon.series) || []; }
+function jcMovies() { return (INDEX.jcartoon && INDEX.jcartoon.movies) || []; }
+function jcSeriesOf(id) { return jcSeries().find((x) => x.id === id) || null; }
+function jcMovieOf(id) { return jcMovies().find((x) => x.id === id) || null; }
+function jcMapMovie(slug) { const m = INDEX.jcartoon && INDEX.jcartoon.map; return m ? m[slug] : null; }
+function jcMapSeries(slug) { const m = INDEX.jcartoon && INDEX.jcartoon.smap; return m ? m[slug] : null; }
+function jcHdr() { return { 'User-Agent': UA, Accept: 'application/json', Referer: 'https://jcartoon.top/' }; }
+async function jcUrlForEpisode(epId) {
+  let r;
+  try { r = await fetchT('https://jcartoon.top/api/episode/' + epId + '/download-manifest', { headers: jcHdr() }, 12000); }
+  catch (e) { return null; }
   if (!r.ok) return null;
-  const j = await r.json();
+  let j; try { j = await r.json(); } catch (e) { return null; }
   const tok = j && j.qualities && j.qualities[0] && j.qualities[0].playlistToken;
   if (!tok) return null;
   try {
@@ -380,6 +377,20 @@ async function jcFreshUrl(item) {
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return new TextDecoder().decode(bytes);
   } catch (e) { return null; }
+}
+async function jcUrlForMovie(id) {
+  let r;
+  try { r = await fetchT('https://jcartoon.top/api/movie/' + id + '/stream', { headers: jcHdr() }, 12000); }
+  catch (e) { return null; }
+  if (!r.ok) return null;
+  let j; try { j = await r.json(); } catch (e) { return null; }
+  return (j && j.playUrl) || null;
+}
+function jcStreams(fresh, origin, label, group) {
+  return [
+    { name: 'جي كرتون · ١٠٨٠p', title: label + ' — مباشر', url: fresh, behaviorHints: { notWebReady: true, bingeGroup: group } },
+    { name: 'جي كرتون · سحابي', title: label + ' — عبر السحابة (لو تعطّل المباشر)', url: `${origin}/proxy?u=${b64url(fresh)}`, behaviorHints: { notWebReady: true, bingeGroup: group + '-p' } },
+  ];
 }
 
 // ---- manifest -------------------------------------------------------------
@@ -396,7 +407,8 @@ function buildManifest(url) {
     movies.push({ id: 'stardima-new-movies', type: 'movie', name: `${NAME}: أحدث الأفلام`, extra: searchExtra });
     movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: أفلام (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
     // مصدر ثانٍ: jcartoon.top — كل عنصر فيه فيديو واحد بجودة FULL HD
-    if (jcItems().length) movies.push({ id: 'jcartoon', type: 'movie', name: `جي كرتون: ١٠٨٠p (${arabicNum(jcItems().length)})`, extra: [...searchExtra] });
+    if (jcMovies().length) movies.push({ id: 'jcartoon', type: 'movie', name: `جي كرتون: أفلام ١٠٨٠p (${arabicNum(jcMovies().length)})`, extra: [...searchExtra] });
+  if (jcSeries().length) series.push({ id: 'jcartoon-series', type: 'series', name: `جي كرتون: مسلسلات ١٠٨٠p (${arabicNum(jcSeries().length)})`, extra: [...searchExtra] });
   } else {
     const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
     for (let c = 1; c <= sChunks; c++) series.push({
@@ -628,15 +640,24 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       return json({ metas });
     }
 
-    // jcartoon catalogue (movie type, every entry is one 1080p video)
+    // jcartoon catalogues — every entry here was probed and plays today
     if (id === 'jcartoon' || id === 'jcartoon-new') {
       const q = (extras.search || '').trim();
-      let list = jcItems();
+      let list = jcMovies();
       if (q) { const nq = normTitle(q); list = list.filter((x) => normTitle(x.title).indexOf(nq) >= 0); }
       return json({ metas: list.map((x) => ({
         id: 'jcartoon:' + x.id, type: 'movie', name: x.title,
         poster: x.poster || undefined, description: x.desc || undefined,
-        releaseInfo: x.year ? String(x.year) : undefined,
+      })) });
+    }
+    if (id === 'jcartoon-series') {
+      const q = (extras.search || '').trim();
+      let list = jcSeries();
+      if (q) { const nq = normTitle(q); list = list.filter((x) => normTitle(x.title).indexOf(nq) >= 0); }
+      return json({ metas: list.map((x) => ({
+        id: 'jcartoon-s:' + x.id, type: 'series', name: x.title,
+        poster: x.poster || undefined,
+        description: (x.desc ? x.desc + '\n' : '') + `عدد الحلقات: ${x.total}`,
       })) });
     }
 
@@ -679,17 +700,27 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const m = /^\/meta\/([^/]+)\/([^/]+)$/.exec(path);
     if (!m) return notFound();
     const type = m[1];
-    if (decodeURIComponent(m[2]).startsWith('jcartoon:')) {
-      const it = jcFind(m[2]);
+    if (decodeURIComponent(m[2]).startsWith('jcartoon-s:')) {
+      const it = jcSeriesOf(decodeURIComponent(m[2]).slice('jcartoon-s:'.length));
       if (!it) return notFound();
-      const mins = it.duration ? Math.round(it.duration / 60) : 0;
+      const videos = (it.episodes || []).map((e, i) => ({
+        id: 'jcartoon-s:' + it.id + ':' + e[0],
+        title: 'الحلقة ' + (e[1] || i + 1),
+        season: e[2] || 1, episode: e[1] || i + 1, episodeId: e[0],
+      }));
+      return json({ meta: {
+        id: 'jcartoon-s:' + it.id, type: 'series', name: it.title,
+        poster: it.poster || undefined, description: it.desc || undefined,
+        genres: ['جي كرتون', it.genre].filter(Boolean), videos,
+      } });
+    }
+    if (decodeURIComponent(m[2]).startsWith('jcartoon:')) {
+      const it = jcMovieOf(decodeURIComponent(m[2]).slice('jcartoon:'.length));
+      if (!it) return notFound();
       return json({ meta: {
         id: 'jcartoon:' + it.id, type: 'movie', name: it.title,
-        poster: it.poster || undefined, background: it.backdrop || undefined,
-        description: it.desc || undefined,
+        poster: it.poster || undefined, description: it.desc || undefined,
         genres: ['جي كرتون', it.genre].filter(Boolean),
-        runtime: mins ? mins + ' دقيقة' : undefined,
-        releaseInfo: it.year ? String(it.year) : undefined,
       } });
     }
     const slug = decodeURIComponent(m[2]).replace(/^stardima:/, '').split(':')[0];
@@ -748,19 +779,21 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const m = /^\/stream\/([^/]+)\/([^/]+)$/.exec(path);
     if (!m) return notFound();
     const type = m[1];
-    if (decodeURIComponent(m[2]).startsWith('jcartoon:')) {
-      const it = jcFind(m[2]);
-      if (!it) return notFound();
-      const fresh = await jcFreshUrl(it);
+    if (decodeURIComponent(m[2]).startsWith('jcartoon-s:')) {
+      const rest = decodeURIComponent(m[2]).slice('jcartoon-s:'.length);
+      const bits = rest.split(':');
+      const epId = bits[bits.length - 1];
+      const fresh = await jcUrlForEpisode(epId);
       if (!fresh) return json({ streams: [] });
-      const tag = '١٠٨٠p';
-      const origin = url.origin;
-      return json({ streams: [
-        { name: 'جي كرتون · ' + tag, title: it.title + ' — ١٩٢٠×١٠٨٠ مباشر',
-          url: fresh, behaviorHints: { notWebReady: true, bingeGroup: 'jcartoon' } },
-        { name: 'جي كرتون · سحابي', title: it.title + ' — نفس الجودة عبر السحابة (لو تعطّل المباشر)',
-          url: `${origin}/proxy?u=${b64url(fresh)}`, behaviorHints: { notWebReady: true, bingeGroup: 'jcartoon-proxy' } },
-      ] });
+      return json({ streams: jcStreams(fresh, url.origin, 'حلقة كاملة ١٩٢٠×١٠٨٠', 'jcartoon') });
+    }
+    if (decodeURIComponent(m[2]).startsWith('jcartoon:')) {
+      const id = decodeURIComponent(m[2]).slice('jcartoon:'.length);
+      const it = jcMovieOf(id);
+      if (!it) return notFound();
+      const fresh = await jcUrlForMovie(it.id);
+      if (!fresh) return json({ streams: [] });
+      return json({ streams: jcStreams(fresh, url.origin, it.title + ' — ١٩٢٠×١٠٨٠', 'jcartoon') });
     }
     const raw = decodeURIComponent(m[2]).replace(/^stardima:/, '');
     if (type !== 'series' && type !== 'movie') return notFound();
@@ -800,20 +833,33 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       targets.push({ memberSlug: slug, label: langLabel(slug), epId: useEpId || null });
     }
 
-    // Same work also lives on jcartoon at 1080p? Put it first — better copy wins.
-    const jcHit = (INDEX.jcartoon && INDEX.jcartoon.map) ? INDEX.jcartoon.map[slug] : null;
+    // Same work also lives on jcartoon at 1080p? Put that copy first — better wins.
     const jcFirst = [];
-    if (jcHit && type === 'movie') {
-      try {
-        const fresh = await jcFreshUrl(jcHit);
-        if (fresh) {
-          jcFirst.push({ name: 'جي كرتون · ١٠٨٠p', title: 'نسخة كاملة ١٩٢٠×١٠٨٠ — مباشر',
-            url: fresh, behaviorHints: { notWebReady: true, bingeGroup: 'jcartoon' } });
-          jcFirst.push({ name: 'جي كرتون · سحابي', title: 'نفس الجودة عبر السحابة (لو تعطّل المباشر)',
-            url: `${url.origin}/proxy?u=${b64url(fresh)}`, behaviorHints: { notWebReady: true, bingeGroup: 'jcartoon-proxy' } });
+    try {
+      const movieHit = type === 'movie' ? jcMapMovie(slug) : null;
+      if (movieHit) {
+        const fresh = await jcUrlForMovie(movieHit.id);
+        if (fresh) jcFirst.push(...jcStreams(fresh, url.origin, 'نسخة كاملة ١٩٢٠×١٠٨٠', 'jcartoon'));
+      }
+      // series: match the episode by its number in the original
+      const seriesHit = type === 'series' ? jcMapSeries(slug) : null;
+      if (seriesHit && !jcFirst.length) {
+        const jcS = jcSeriesOf(seriesHit.id);
+        let epNo = null;
+        if (jcS) {
+          try {
+            const mm = await getSeriesMeta(slug);
+            const v = ((mm && mm.videos) || []).find((x) => String(x.episodeId || String(x.id).split(':').pop()) === String(useEpId));
+            if (v) epNo = v.episode || null;
+          } catch (e) { /* fall through */ }
         }
-      } catch (e) { /* jcartoon down → Stardima streams still answer */ }
-    }
+        const jcEp = jcS && epNo != null ? (jcS.episodes || []).find((e) => String(e[1]) === String(epNo)) : null;
+        if (jcEp) {
+          const fresh = await jcUrlForEpisode(jcEp[0]);
+          if (fresh) jcFirst.push(...jcStreams(fresh, url.origin, 'الحلقة ' + epNo + ' بجودة ١٩٢٠×١٠٨٠', 'jcartoon'));
+        }
+      }
+    } catch (e) { /* jcartoon down → Stardima streams still answer */ }
 
     const origin = url.origin;
     const collected = [];
