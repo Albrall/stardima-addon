@@ -18,6 +18,13 @@ const norm = (s) => String(s || '')
   .replace(/\s+/g, ' ')
   .trim();
 const STOP = new Set(['the', 'and', 'for', 'with', 'its', 'his', 'her', 'all', 'new', 'من', 'في', 'على', 'الى', 'إلى', 'مع', 'عن', 'هذا', 'هذه']);
+// stronger than norm(): punctuation, %, and the words each site bolts on ("المسلسل",
+// "مترجم", "- series") all go away, so "100 % ذئب" and "100% ذئب" become the same key
+const keyTitle = (s) => norm(s)
+  .replace(/\b(المسلسل|مسلسل|الفيلم|فيلم|movie|film|series|special|سبيشل|مترجم|مدبلج|كامل|كاملة)\b/g, ' ')
+  .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
 const toks = (s) => new Set(norm(s).split(' ').filter((w) => w.length > 2 && !STOP.has(w)));
 const jac = (a, b) => {
   if (!a.size || !b.size) return 0;
@@ -30,7 +37,7 @@ const idx = JSON.parse(fs.readFileSync(path.join(SRC, 'catalog-index.min.json'),
 const ours = [];
 for (const k of ['series', 'movies']) for (const it of idx[k].items) ours.push({ slug: it[0], title: it[1], kind: k === 'movies' ? 'movie' : 'series' });
 
-const ourT = ours.map((o) => ({ ...o, n: norm(o.title), t: toks(o.title) }));
+const ourT = ours.map((o) => ({ ...o, n: norm(o.title), k: keyTitle(o.title), t: toks(o.title) }));
 const smap = {}, fmap = {}, report = [];
 
 // A single shared word is not a match ("جو البطل" vs "مغامرات البطل وتاروو"), and neither
@@ -51,6 +58,11 @@ function best(theirTitle, kind) {
   if (hit) return { o: hit, how: 'exact', conf: 3 };
   hit = ourT.find((o) => o.n === n);                       // same title, other section
   if (hit) return { o: hit, how: 'exact-other-section', conf: 3 };
+  const k = keyTitle(theirTitle);
+  hit = ourT.find((o) => o.k === k && o.kind === kind);
+  if (hit) return { o: hit, how: 'key', conf: 2 };         // same work, different punctuation
+  hit = ourT.find((o) => o.k === k);
+  if (hit) return { o: hit, how: 'key-other-section', conf: 2 };
   let bestO = null, bestS = 0;
   for (const o of ourT) {
     if (o.kind !== kind) continue;

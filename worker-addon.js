@@ -16,14 +16,14 @@ const {
 const { getServers, getMovieServers, orderServers } = __req("lib/resolver.js");
 const { resolveHost, UA } = __req("lib/hosts.js");
 
-const NAME = 'Stardima';
+const NAME = 'كرتون زمان';
 // Measured 2026-09: only uqload is playable from a Cloudflare Worker. Mixdrop and
 // Lulustream return IP-bound tokens and 403 the CDN from Cloudflare *and* from
 // Render/other datacenters (verified), savefiles serves a JS challenge, and
 // streamhg/goodstream hide the stream behind obfuscated JWPlayer bootstrap code.
 // So: uqload first, the rest kept as user-visible options that may work later.
 const DEAD_FROM_EDGE = /mixdrop|mxdrop|lulustream|savefiles|hgcloud|streamhg|strema|goodstream/i;
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 const ID = 'community.stardima';
 const CHUNK_SIZE = 450; // items per chunked catalog
 // 'single'  = two long catalogs (all series, all movies) — one list, nothing to navigate
@@ -374,6 +374,36 @@ function relInfo(year, h) {
   return bits.length ? bits.join(' · ') : undefined;
 }
 
+// same idea as the build-time matcher: drop what the sites bolt onto a title
+// ("المسلسل", "مترجم", punctuation), then compare — so "100 % ذئب" == "100% ذئب"
+function keyTitle(t) {
+  return normTitle(String(t || ''))
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\b(المسلسل|مسلسل|الفيلم|فيلم|movie|film|series|special|سبيشل|مترجم|مدبلج|كامل|كاملة)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Every jcartoon work that we do NOT already carry, as one card. Works we do carry get
+// their 1080p copy interleaved into our own entry (jcFirst), so nothing appears twice.
+function jcStandalone(kind) {
+  const items = (((INDEX[kind === 'series' ? 'series' : 'movies'] || {}).items) || []);
+  const titles = new Set(items.map((it) => keyTitle(it[1])));
+  const jc = (INDEX.jcartoon) || {};
+  const mapped = new Set();
+  for (const m of [jc.smap || {}, jc.map || {}]) for (const k of Object.keys(m)) if (m[k] && m[k].id) mapped.add(m[k].id);
+  const list = kind === 'series' ? jcSeries() : jcMovies();
+  return list.filter((x) => x && x.id && !mapped.has(x.id) && !titles.has(keyTitle(x.title)));
+}
+function jcCard(x, type) {
+  return {
+    id: (type === 'series' ? 'jcseries-' : 'jcartoon-') + x.id,
+    type, name: x.title, poster: x.poster || undefined,
+    releaseInfo: '1080p',
+    description: x.desc || undefined,
+  };
+}
+
 function jcSeries() { return (INDEX.jcartoon && INDEX.jcartoon.series) || []; }
 function jcMovies() { return (INDEX.jcartoon && INDEX.jcartoon.movies) || []; }
 function jcSeriesOf(id) { return jcSeries().find((x) => x.id === id) || null; }
@@ -444,8 +474,8 @@ async function jcUrlForMovie(id) {
 }
 function jcStreams(fresh, origin, label, group) {
   return [
-    { name: 'جي كرتون · ١٠٨٠p', title: label + ' — مباشر', url: fresh, behaviorHints: { notWebReady: true, bingeGroup: group } },
-    { name: 'جي كرتون · سحابي', title: label + ' — عبر السحابة (لو تعطّل المباشر)', url: `${origin}/proxy?u=${b64url(fresh)}`, behaviorHints: { notWebReady: true, bingeGroup: group + '-p' } },
+    { name: '١٠٨٠p', title: label + ' — مباشر', url: fresh, behaviorHints: { notWebReady: true, bingeGroup: group } },
+    { name: '١٠٨٠p · بديل', title: label + ' — عبر السحابة (لو تعطّل المباشر)', url: `${origin}/proxy?u=${b64url(fresh)}`, behaviorHints: { notWebReady: true, bingeGroup: group + '-p' } },
   ];
 }
 
@@ -454,24 +484,30 @@ function buildManifest(url) {
   const mode = catalogMode(url);
   const arabicNum = (n) => String(n).replace(/\d/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
   const searchExtra = [{ name: 'search', isRequired: false }];
+  const qitems = (INDEX.quality && INDEX.quality.items) || {};
+  const jcHdCount = (kind) => {
+    const key = kind === 'series' ? 'series' : 'movies';
+    const ours = (((INDEX[key] || {}).items) || []).filter((it) => qitems[it[0]] && qitems[it[0]].h >= 720).length;
+    return ours + jcStandalone(key).length;
+  };
   const series = [], movies = [];
   if (mode === 'single') {
     const genreExtra = genreOptions().length
       ? [{ name: 'genre', options: genreOptions(), isRequired: false }] : [];
+    series.push({ id: 'stardima', type: 'series', name: `${NAME}: كل المسلسلات (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
     series.push({ id: 'stardima-new', type: 'series', name: `${NAME}: أحدث المسلسلات`, extra: searchExtra });
-    series.push({ id: 'stardima', type: 'series', name: `${NAME}: مسلسلات (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
+    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: كل الأفلام (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
     movies.push({ id: 'stardima-new-movies', type: 'movie', name: `${NAME}: أحدث الأفلام`, extra: searchExtra });
-    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: أفلام (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
     // مصدر ثانٍ: jcartoon.top — كل عنصر فيه فيديو واحد بجودة FULL HD
     if ((((INDEX.quality || {}).items) && Object.keys(INDEX.quality.items).length)) {
     const qs = INDEX.quality.items;
-    const hdS = (((INDEX.series || {}).items) || []).filter((it) => qs[it[0]] && qs[it[0]].h >= 720).length;
-    const hdM = (((INDEX.movies || {}).items) || []).filter((it) => qs[it[0]] && qs[it[0]].h >= 720).length;
+    const hdS = jcHdCount('series');
+    const hdM = jcHdCount('movies');
     if (hdS) series.push({ id: 'stardima-hd', type: 'series', name: `${NAME}: ٧٢٠p فأعلى (${arabicNum(hdS)})`, extra: [...searchExtra] });
     if (hdM) movies.push({ id: 'stardima-hd-movies', type: 'movie', name: `${NAME}: أفلام ٧٢٠p فأعلى (${arabicNum(hdM)})`, extra: [...searchExtra] });
   }
-  if (jcMovies().length) movies.push({ id: 'jcartoon', type: 'movie', name: `جي كرتون: أفلام ١٠٨٠p (${arabicNum(jcMovies().length)})`, extra: [...searchExtra] });
-  if (jcSeries().length) series.push({ id: 'jcartoon-series', type: 'series', name: `جي كرتون: مسلسلات ١٠٨٠p (${arabicNum(jcSeries().length)})`, extra: [...searchExtra] });
+  // the second source is no longer a shelf of its own: its works sit inside the two
+  // lists above (and the 720p shelves), and its 1080p copies lead inside our entries
   } else {
     const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
     for (let c = 1; c <= sChunks; c++) series.push({
@@ -485,11 +521,11 @@ function buildManifest(url) {
       extra: searchExtra,
     });
   }
-  const sN = (((INDEX.series || {}).items) || []).length;
-  const mN = (((INDEX.movies || {}).items) || []).length;
+  const sN = (((INDEX.series || {}).items) || []).filter((it) => !isAlias(it[0])).length + jcStandalone('series').length;
+  const mN = (((INDEX.movies || {}).items) || []).filter((it) => !isAlias(it[0])).length + jcStandalone('movies').length;
   return {
-    id: ID, version: VERSION, name: `${NAME} — ستارديما (أ-ي)`,
-    description: 'مكتبة ستارديما كاملة مرتبة أبجديًا: ' + sN + ' مسلسل و' + mN + ' فيلم، مع حلقات وبث مباشر',
+    id: ID, version: VERSION, name: NAME,
+    description: 'مكتبة كرتون كاملة مرتبة أبجديًا — ' + sN + ' مسلسل و' + mN + ' فيلم، مع الحلقات وبث مباشر',
     resources: ['catalog', 'meta', 'stream'], types: ['series', 'movie'],
     idPrefixes: ['stardima:'], catalogs: [...series, ...movies],
     behaviorHints: { configurableFor: false, configurationRequired: false },
@@ -605,7 +641,7 @@ function maybeSelfCheck(ctx) {
     const r = await selfCheck();
     if (!r.ok) {
       const lines = Object.entries(r.checks).map(([k, v]) => (v.ok ? 'OK ' : 'FAIL ') + k + ': ' + JSON.stringify(v)).join('\n');
-      await alertPush('تنبيه: عطل في أدئون ستارديما', lines, false, _env);
+      await alertPush('تنبيه: عطل في أدئون ' + NAME, lines, false, _env);
     }
   })().catch(() => {});
   try { ctx && ctx.waitUntil(p); } catch (e) { /* no ctx */ }
@@ -620,7 +656,7 @@ async function handleRequest(url, req, ctx) {
   if (path === '/manifest.json' || path === '/manifest') { maybeSelfCheck(_ctx); return json(buildManifest(url)); }
   if (path === '/' || path === '/configure') {
     return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>${NAME} — ستارديما (أ-ي)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${NAME}</title>
 <style>body{font-family:system-ui,-apple-system,sans-serif;background:#0b1020;color:#e8ecf5;margin:0;padding:22px;line-height:1.7}
 .card{max-width:640px;margin:0 auto;background:#141b33;border:1px solid #24305a;border-radius:16px;padding:22px}
 input{width:100%;padding:12px;border-radius:10px;border:1px solid #2c3a6b;background:#0d1428;color:#e8ecf5;box-sizing:border-box;direction:ltr;font-size:13px}
@@ -630,8 +666,8 @@ button,.btn{display:inline-block;margin:12px 6px 0 0;padding:12px 18px;backgroun
 ol,ul{padding-inline-start:20px;opacity:.92}
 hr{border:0;border-top:1px solid #24305a;margin:20px 0}
 small{opacity:.6}</style></head><body><div class="card">
-<h1 style="margin:0 0 6px;font-size:21px">🎬 ستارديما — مرتب أ-ي</h1>
-<p style="opacity:.8;margin:0 0 16px">2257 مسلسل · 1597 فيلم · حلقات · بحث · بث مباشر</p>
+<h1 style="margin:0 0 6px;font-size:21px">🎬 ${NAME}</h1>
+<p style="opacity:.8;margin:0 0 16px">${(((INDEX.series || {}).items) || []).filter((it) => !isAlias(it[0])).length + jcStandalone('series').length} مسلسل · ${(((INDEX.movies || {}).items) || []).filter((it) => !isAlias(it[0])).length + jcStandalone('movies').length} فيلم · حلقات · بحث · بث مباشر</p>
 <p style="margin:0 0 6px">رابط الأدئون (الصقه في Nuvio أو Stremio):</p>
 <input id="u" readonly value="${url.origin}/manifest.json" onclick="this.select()">
 <div><button onclick="cp()">📋 نسخ الرابط</button><span id="m" class="ok"></span>
@@ -649,7 +685,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
   }
 
   if (path === '/alert-test') {
-    const res = await alertIssue('اختبار: تنبيه أدئون ستارديما', 'هذه رسالة اختبار — وصلتك لأن التنبيهات تعمل. ستصلك رسالة مشابهة تلقائيًا إذا وقع عطل في الأدئون أو في موقع ستارديما.', _env);
+    const res = await alertIssue('اختبار: تنبيه أدئون ' + NAME, 'هذه رسالة اختبار — وصلتك لأن التنبيهات تعمل. ستصلك رسالة مشابهة تلقائيًا إذا وقع عطل في الأدئون.', _env);
     return json({ sent: !!res.ok, via: 'github-issue', result: res });
   }
   if (path === '/health' && url.searchParams.get('deep')) {
@@ -746,31 +782,10 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           id, type, name: x.title,
           poster: x.poster || undefined,
           releaseInfo: relInfo(x.year, x.jc ? 1080 : qOf(primarySlug(x.slug || x.id))),
-          description: x.jc ? 'جي كرتون — جودة ١٩٢٠×١٠٨٠' : undefined,
+          description: x.jc ? 'جودة ١٩٢٠×١٠٨٠ — FULL HD' : undefined,
         });
       }
       return json({ metas });
-    }
-
-    // jcartoon catalogues — every entry here was probed and plays today
-    if (id === 'jcartoon' || id === 'jcartoon-new') {
-      const q = (extras.search || '').trim();
-      let list = jcMovies();
-      if (q) { const nq = normTitle(q); list = list.filter((x) => normTitle(x.title).indexOf(nq) >= 0); }
-      return json({ metas: list.map((x) => ({
-        id: 'jcartoon-' + x.id, type: 'movie', name: x.title,
-        poster: x.poster || undefined, description: x.desc || undefined,
-      })) });
-    }
-    if (id === 'jcartoon-series') {
-      const q = (extras.search || '').trim();
-      let list = jcSeries();
-      if (q) { const nq = normTitle(q); list = list.filter((x) => normTitle(x.title).indexOf(nq) >= 0); }
-      return json({ metas: list.map((x) => ({
-        id: 'jcseries-' + x.id, type: 'series', name: x.title,
-        poster: x.poster || undefined,
-        description: (x.desc ? x.desc + '\n' : '') + `عدد الحلقات: ${x.total}`,
-      })) });
     }
 
     const key = type === 'series' ? 'series' : 'movies'; // the type segment is authoritative
@@ -787,12 +802,14 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       const key = id === 'stardima-hd' ? 'series' : 'movies';
       const qs = (INDEX.quality && INDEX.quality.items) || {};
       const rows = (((INDEX[key] || {}).items) || [])
-        .map((it) => ({ it, h: qs[it[0]] ? qs[it[0]].h : 0 }))
-        .filter((x) => x.h >= 720)
-        .sort((a, b) => b.h - a.h || byTitleAr(a.it[1], b.it[1]));
+        .filter((it) => !isAlias(it[0]))
+        .map((it) => ({ card: toMeta(it), h: (qs[it[0]] ? qs[it[0]].h : 0) }))
+        .filter((x) => x.h >= 720);
+      for (const x of jcStandalone(key)) rows.push({ card: jcCard(x, type), h: 1080 }); // FULL HD source
+      rows.sort((a, b) => b.h - a.h || byTitleAr(a.card.name, b.card.name));
       const q = (extras.search || '').trim();
-      const filtered = q ? rows.filter((x) => normTitle(x.it[1]).indexOf(normTitle(q)) >= 0) : rows;
-      return json({ metas: filtered.map((x) => toMeta(x.it)) });
+      const out = q ? rows.filter((x) => normTitle(x.card.name).indexOf(normTitle(q)) >= 0) : rows;
+      return json({ metas: out.map((x) => x.card) });
     }
 
     if (id === 'stardima-new' || id === 'stardima-new-movies') {
@@ -807,20 +824,26 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     let sorted = await sortedItems(key);
     sorted = sorted.filter((it) => !isAlias(it[0])); // duplicate uploads live under the primary entry
     if (extras.genre) sorted = sorted.filter((it) => genreMatches(it[0], extras.genre));
-    if (extras.skip) { const sk = parseInt(extras.skip, 10) || 0; if (sk > 0) sorted = sorted.slice(sk); }
-    const total = sorted.length;
+    // one unified list: our works plus every 1080p-only work we do not already carry
+    const metas = sorted.map(toMeta);
+    if (!extras.genre) {
+      const extra = jcStandalone(key).map((x) => jcCard(x, type));
+      if (extra.length) { metas.push(...extra); metas.sort((a, b) => byTitleAr(a.name, b.name)); }
+    }
+    if (extras.skip) { const sk = parseInt(extras.skip, 10) || 0; if (sk > 0) metas.splice(0, sk); }
+    const total = metas.length;
     // Older installs (and ?mode=chunked) still ask for stardima-s3 / stardima-m2
     // style ids — keep serving those as 450-item slices so nothing breaks.
     const isChunkId = /^stardima-[sm]\d+$/.test(id);
     if (!isChunkId && catalogMode(url) === 'single') {
       // One long list per type: Nuvio loads it once and scrolls locally.
-      return json({ metas: sorted.map(toMeta) });
+      return json({ metas });
     }
     const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
     const c = Math.min(Math.max(1, chunkOf(id)), chunks);
     const start = (c - 1) * CHUNK_SIZE;
     const end = c === chunks ? total : Math.min(start + CHUNK_SIZE, total); // last chunk uncapped
-    return json({ metas: sorted.slice(start, end).map(toMeta) });
+    return json({ metas: metas.slice(start, end) });
   }
 
   // /meta/{type}/{id}.json  (id = stardima:{slug})
@@ -842,7 +865,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         return json({ meta: {
           id: 'jcseries-' + it.id, type: 'series', name: it.title,
           poster: it.poster || undefined, description: it.desc || undefined,
-          genres: ['جي كرتون', it.genre].filter(Boolean), videos,
+          genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean), videos,
         } });
       }
       const it = jcMovieOf(jcm.id) || jcSeriesOf(jcm.id); // be forgiving about type mix-ups
@@ -853,7 +876,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           title: 'الحلقة ' + (e[1] || i + 1),
           season: e[2] || 1, episode: e[1] || i + 1, episodeId: e[0],
         }));
-        return json({ meta: { id: 'jcseries-' + it.id, type: 'series', name: it.title, poster: it.poster || undefined, description: it.desc || undefined, genres: ['جي كرتون', it.genre].filter(Boolean), videos } });
+        return json({ meta: { id: 'jcseries-' + it.id, type: 'series', name: it.title, poster: it.poster || undefined, description: it.desc || undefined, genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean), videos } });
       }
       return json({ meta: {
         id: 'jcartoon-' + it.id, type: 'movie', name: it.title,
@@ -1133,7 +1156,7 @@ module.exports = {
     _env = env || _env;
     const r = await selfCheck();
     const lines = Object.entries(r.checks).map(([k, v]) => (v.ok ? '✅' : '❌') + ' ' + k + ': ' + JSON.stringify(v)).join('\n');
-    if (!r.ok) await alertPush('تنبيه: عطل في أدئون ستارديما', lines, false, env);
+    if (!r.ok) await alertPush('تنبيه: عطل في أدئون ' + NAME, lines, false, env);
     return r;
   },
   async fetch(req, env, ctx) {

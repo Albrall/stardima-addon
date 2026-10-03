@@ -69,7 +69,12 @@ function firstEpisodeOf(title) {
     for (const it of index[sec].items) rows.push({ sec, kind: sec === 'series' ? 'series' : 'movie', slug: it[0], title: it[1] });
   }
   const CAP = Number(process.env.CAP || 0); // 0 = no cap; used to get a bounded sample fast
-  let todo = rows.filter((r) => !(r.slug in state.done));
+  let todo = rows.filter((r) => {
+    const d = state.done[r.slug];
+    if (!d) return true;
+    if (d.err && (d.tries || 1) < 2) { d.tries = (d.tries || 1) + 1; return true; } // one retry for transient failures
+    return false;
+  });
   if (CAP) todo = todo.filter((r, i) => i % Math.max(1, Math.floor(rows.length / CAP)) === 0).slice(0, CAP);
   console.log(`  total ${rows.length} · done ${rows.length - todo.length} · left ${todo.length}`);
 
