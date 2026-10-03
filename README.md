@@ -147,3 +147,10 @@ curl -X PUT "$CF_API/accounts/$CF_ACCOUNT/workers/scripts/stardima-proxy" \
   opportunistic 6-hourly self-check.
 - Per-episode thumbnails are not published by the site (only series posters and an
   og:image on each /play page), so episode rows show title + number only.
+
+## مصدر ثانٍ: جي كرتون (jcartoon.top)
+- `src/build-jcartoon.js` يبني `src/jcartoon.json`: كل عمل عندهم قابل للتشغيل الآن (٧٣ عملًا فريدًا) — كلها ١٩٢٠×١٠٨٠ (تحققنا بفك ترميز المقاطع، H.264 High@L5.0).
+- `src/jc-map.json`: ربط تلقائي بالعنوان التام بين مكتبة ستارديما وجي كرتون (١١ عملًا) — عند التشغيل تُعرض نسخة ١٠٨٠p أولًا.
+- الروابط موقّعة وتنتهي صلاحيتها، لذلك لا تُخزّن أبدًا: العامل يطلب رابطًا جديدًا عند كل تشغيل (`/api/episode/<id>/download-manifest` أو `/api/movie/<id>/stream`).
+- كتالوج جديد في المانفست: `movie/jcartoon`، وكل عنصر فيه فيديو واحد (نوع movie في بروتوكول ستريميو).
+- القنوات المباشرة (سبيستون، MBC3، سبيستون غو…) موجودة في `jcartoon.json` لكن غير مربوطة بعد.

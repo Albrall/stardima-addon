@@ -21,12 +21,16 @@ function rewrite(code, fromId) {
 
 // worker-router.js contains `const INDEX = /*__INDEX__*/{};` — inject the real index
 const idx = JSON.parse(fs.readFileSync(path.join(ROOT, 'catalog-index.min.json'), 'utf8'));
-let genres = null, ourGenres = null, families = null;
+let genres = null, ourGenres = null, families = null, jcartoon = null;
 try { families = JSON.parse(fs.readFileSync(path.join(ROOT, 'families.json'), 'utf8')); } catch (e) { /* optional */ }
 try { genres = JSON.parse(fs.readFileSync(path.join(ROOT, 'genres.json'), 'utf8')); } catch (e) { /* optional */ }
+try { jcartoon = JSON.parse(fs.readFileSync(path.join(ROOT, 'jcartoon.json'), 'utf8')); } catch (e) { /* optional */ }
+let jcMap = null;
+try { jcMap = JSON.parse(fs.readFileSync(path.join(ROOT, 'jc-map.json'), 'utf8')).items; } catch (e) { /* optional */ }
 try { ourGenres = JSON.parse(fs.readFileSync(path.join(ROOT, 'our-genres.json'), 'utf8')); } catch (e) { /* optional */ }
 const indexLiteral = JSON.stringify({ built: idx.built, series: idx.series, movies: idx.movies, genres: genres && { labels: genres.labels, items: genres.items }, ourGenres: ourGenres && { labels: ourGenres.labels, items: ourGenres.items },
-                    families: families && { families: families.families, memberOf: families.memberOf, epMap: families.epMap, lang: families.lang } });
+                    families: families && { families: families.families, memberOf: families.memberOf, epMap: families.epMap, lang: families.lang },
+                    jcartoon: jcartoon && { items: jcartoon.items, built: jcartoon.built, map: jcMap || {} } });
 function prep(f) {
   let code = fs.readFileSync(path.join(ROOT, f), 'utf8');
   if (f === 'worker-router.js') {
