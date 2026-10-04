@@ -6,7 +6,7 @@ const {
   BASE, getJson, videoToItem, getSeriesMeta, getMovieMeta, getEpisodeLink,
   searchCatalog, compactPoster, decodePoster, byTitleAr, normTitle,
 } = require('./lib/stardima');
-const { getServers, getMovieServers, orderServers } = require('./lib/resolver');
+const { getServers, getMovieServers, orderServers, serverHealth } = require('./lib/resolver');
 const { resolveHost, UA } = require('./lib/hosts');
 
 const NAME = 'كرتون زمان';
@@ -363,6 +363,9 @@ function rOf(id) {
   return it || null;
 }
 function ratingTag(v) { return v && v.vote ? '★' + v.vote : ''; }
+const TMDB_IMG = 'https://image.tmdb.org/t/p/';
+function artOf(r, size) { return r && r.poster ? TMDB_IMG + (size || 'w500') + r.poster : undefined; }
+function backOf(r) { return r && r.backdrop ? TMDB_IMG + 'w1280' + r.backdrop : undefined; }
 
 function qOf(slug) {
   const q = INDEX.quality && INDEX.quality.items && INDEX.quality.items[slug];
@@ -419,7 +422,7 @@ function jcCard(x, type) {
   const r = rOf(key);
   return {
     id: key,
-    type, name: x.title, poster: x.poster || undefined,
+    type, name: x.title, poster: x.poster || artOf(r),
     releaseInfo: (r && r.vote ? '1080p · ★' + r.vote : '1080p'),
     description: x.desc || undefined,
   };
@@ -885,6 +888,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           poster: x.poster || undefined,
           releaseInfo: relInfo(x.year, x.jc ? 1080 : qOf(primarySlug(x.slug || x.id)),
             x.jc ? rOf(x.id) : rOf('stardima:' + primarySlug(x.slug || x.id))),
+          background: x.jc ? undefined : backOf(rOf('stardima:' + primarySlug(x.slug || x.id))),
           description: x.jc ? 'جودة ١٩٢٠×١٠٨٠ — FULL HD' : undefined,
         });
       }
@@ -1000,7 +1004,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         const rrS = rOf('jcseries-' + it.id);
         return json({ meta: {
           id: 'jcseries-' + it.id, type: 'series', name: it.title,
-          poster: it.poster || undefined,
+          poster: it.poster || artOf(rrS), background: backOf(rrS),
           description: (rrS ? (rrS.vote ? `★ ${rrS.vote}/10 من TMDB\n` : '') + (rrS.overview ? rrS.overview + '\n' : '') : '') + (it.desc || ''),
           genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean), videos,
         } });
@@ -1018,7 +1022,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       const rrM = rOf('jcartoon-' + it.id);
       return json({ meta: {
         id: 'jcartoon-' + it.id, type: 'movie', name: it.title,
-        poster: it.poster || undefined,
+        poster: it.poster || artOf(rrM), background: backOf(rrM),
         description: (rrM ? (rrM.vote ? `★ ${rrM.vote}/10 من TMDB\n` : '') + (rrM.overview ? rrM.overview + '\n' : '') : '') + (it.desc || ''),
         genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean),
       } });
@@ -1035,6 +1039,9 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     if (qh) meta.description = `الجودة الحقيقية: ${qh}p\n` + (meta.description || '');
     const rr = rOf('stardima:' + slug);
     if (rr) {
+      const bk = backOf(rr);
+      if (bk) meta.background = bk;
+      if (!meta.poster) meta.poster = artOf(rr);
       const head = rr.vote ? `★ ${rr.vote}/10 من TMDB\n` : '';
       const body = rr.overview ? rr.overview + '\n' : '';
       if (head || body) meta.description = head + body + (meta.description || '');
@@ -1211,13 +1218,18 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         });
         if (list.length) _cache.set(ck, { t: Date.now(), v: list });
       }
+      const qh = qOf(t.memberSlug); // the measured ceiling for this copy of the work
       for (const srv of (list || [])) {
         const edgeDead = DEAD_FROM_EDGE.test((srv.name || '') + ' ' + (srv.embedUrl || ''));
         const bits = [];
         if (t.label) bits.push(t.label);
         if (edgeDead) bits.push('قد لا يعمل من السحابة');
+        // what you pick matters: show the real quality and whether the host answered
+        const marks = [];
+        if (qh) marks.push(qh + 'p');
+        if (serverHealth(srv) === 'ok') marks.push('✓ يعمل');
         collected.push({
-          name: srv.name,
+          name: srv.name + (marks.length ? ' · ' + marks.join(' · ') : ''),
           title: bits.length ? bits.join(' · ') : (srv.is_vip ? 'VIP' : srv.name),
           url: `${origin}/proxy/embed?u=${b64url(srv.embedUrl)}&n=${b64url(srv.name || '')}`,
           behaviorHints: { notWebReady: true, bingeGroup: (t.label || '') + '|' + srv.name },

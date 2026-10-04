@@ -170,4 +170,11 @@ async function orderServers(servers, opts = {}) {
   return out;
 }
 
-module.exports = { resolveEpisode, getServers, getMovieServers, orderServers, hostRank, getHyperwatchingServers, extractInertiaProps };
+function serverHealth(srv) {
+  const h = _health.get(hostKeyOf(srv));
+  if (!h) return 'unknown';
+  if (!h.ok) return 'bad';
+  return 'ok';
+}
+
+module.exports = { resolveEpisode, getServers, getMovieServers, orderServers, hostRank, getHyperwatchingServers, extractInertiaProps, serverHealth };

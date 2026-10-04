@@ -167,6 +167,8 @@ async function matchOne(ours) {
     vote: typeof t.vote_average === 'number' && t.vote_average > 0 ? Math.round(t.vote_average * 10) / 10 : undefined,
     votes: t.vote_count || undefined,
     overview: (t.overview || '').trim() || undefined,
+    poster: t.poster_path || undefined,      // /abc.jpg — the worker builds the URL
+    backdrop: t.backdrop_path || undefined,
     via: best.via,
   };
   if (!out.vote && !out.overview) return null;
