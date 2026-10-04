@@ -508,6 +508,55 @@ function jcStreams(fresh, origin, label, group) {
 }
 
 // ---- manifest -------------------------------------------------------------
+// Filtering/sorting shared by the plain catalogues: 'جودة' (quality floor) and
+// 'ترتيب' (newest / best quality / highest rating) as Nuvio extras.
+function applyQualitySort(list, extras, kind) {
+  let out = list;
+  const qw = String(extras['جودة'] || '').trim();
+  if (qw) {
+    const floor = qw.indexOf('1080') >= 0 ? 1000 : qw.indexOf('720') >= 0 ? 720 : qw.indexOf('480') >= 0 ? 480 : 0;
+    if (floor) {
+      out = out.filter((x) => {
+        if (x.id.startsWith('jcseries-') || x.id.startsWith('jcartoon-')) return 1080 >= floor;
+        const ps = String(x.id).replace(/^stardima:/, '');
+        const h = qOf(ps);
+        return h && h >= floor;
+      });
+    }
+  }
+  const sw = String(extras['ترتيب'] || '').trim();
+  if (sw) {
+    const rv = (x) => {
+      const r = x.id.startsWith('jc') ? rOf(x.id) : rOf(String(x.id).replace(/^stardima:/, '').indexOf(':') >= 0 ? x.id : x.id);
+      const rr = x.id.startsWith('jc') ? rOf(x.id) : rOf(x.id);
+      const q = rr && rr.vote ? rr.vote : 0;
+      return q;
+    };
+    if (sw === 'الأحدث') {
+      const y = (x) => { const m = /(19|20)\d{2}/.exec(x.releaseInfo || ''); return m ? Number(m[0]) : 0; };
+      out = out.slice().sort((a, b) => y(b) - y(a) || byTitleAr(a.name, b.name));
+    } else if (sw === 'الأعلى جودة') {
+      const h = (x) => { const m = /(\d{3,4})p/.exec(x.releaseInfo || ''); return m ? Number(m[1]) : 0; };
+      out = out.slice().sort((a, b) => h(b) - h(a) || byTitleAr(a.name, b.name));
+    } else if (sw === 'الأعلى تقييمًا') {
+      const bayes = (x) => {
+        const r = rOf(x.id) || {};
+        const v = r.vote || 0, n = r.votes || 0;
+        if (!v) return -1;
+        return (v * n + 7.5 * 100) / (n + 100);   // a 10.0 with 3 votes lands near 7.6
+      };
+      out = out.slice().sort((a, b) => bayes(b) - bayes(a) || byTitleAr(a.name, b.name));
+    }
+  }
+  return out;
+}
+function qualitySortExtra() {
+  return [
+    { name: 'جودة', options: ['1080p فأعلى', '720p فأعلى', '480p فأعلى'], isRequired: false },
+    { name: 'ترتيب', options: ['الأحدث', 'الأعلى جودة', 'الأعلى تقييمًا'], isRequired: false },
+  ];
+}
+
 async function buildManifest(url) {
   const mode = catalogMode(url);
   const arabicNum = (n) => String(n).replace(/\d/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
@@ -542,9 +591,9 @@ async function buildManifest(url) {
   if (mode === 'single') {
     const genreExtra = genreOptions().length
       ? [{ name: 'genre', options: genreOptions(), isRequired: false }] : [];
-    series.push({ id: 'stardima', type: 'series', name: `${NAME}: كل المسلسلات (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
+    series.push({ id: 'stardima', type: 'series', name: `${NAME}: كل المسلسلات (أ-ي)`, extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
     series.push({ id: 'stardima-new', type: 'series', name: `${NAME}: أحدث المسلسلات`, extra: searchExtra });
-    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: كل الأفلام (أ-ي)`, extra: [...genreExtra, ...searchExtra] });
+    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: كل الأفلام (أ-ي)`, extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
     movies.push({ id: 'stardima-new-movies', type: 'movie', name: `${NAME}: أحدث الأفلام`, extra: searchExtra });
     // مصدر ثانٍ: jcartoon.top — كل عنصر فيه فيديو واحد بجودة FULL HD
     if ((((INDEX.quality || {}).items) && Object.keys(INDEX.quality.items).length)) {
@@ -779,9 +828,14 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       if (!src) continue;
       for (const kv of src.split('&')) {
         if (!kv) continue;
-        const i = kv.indexOf('=');
+        // decode the whole pair first: a percent-encoded '=' (%3D) would otherwise be
+        // mistaken for the separator and the option name would come out empty
+        let dec = kv;
+        try { dec = decodeURIComponent(kv); } catch (e) { /* keep as-is */ }
+        const i = dec.indexOf('=');
         if (i < 0) continue;
-        try { extras[decodeURIComponent(kv.slice(0, i))] = decodeURIComponent(kv.slice(i + 1).replace(/\+/g, ' ')); } catch (e) { /* skip */ }
+        const k = dec.slice(0, i).trim();
+        if (k) extras[k] = dec.slice(i + 1).replace(/\+/g, ' ');
       }
     }
     if (type !== 'series' && type !== 'movie') return notFound();
@@ -910,6 +964,8 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       const extra = jcStandalone(key).map((x) => jcCard(x, type));
       if (extra.length) { metas.push(...extra); metas.sort((a, b) => byTitleAr(a.name, b.name)); }
     }
+    const tuned = applyQualitySort(metas, extras, type);
+    if (tuned !== metas) { metas.length = 0; metas.push(...tuned); } // same array when nothing was asked for
     if (extras.skip) { const sk = parseInt(extras.skip, 10) || 0; if (sk > 0) metas.splice(0, sk); }
     const total = metas.length;
     // Older installs (and ?mode=chunked) still ask for stardima-s3 / stardima-m2
@@ -921,7 +977,13 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     }
     const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
     const c = Math.min(Math.max(1, chunkOf(id)), chunks);
-    const start = (c - 1) * CHUNK_SIZE;
+    // A chunk id carries the row it starts at (index = c*CHUNK); only fall back to the
+    // arithmetic (c-1)*CHUNK when the app did not send one.
+    let start = (c - 1) * CHUNK_SIZE;
+    if (!extras.skip && extras.index != null) {
+      const idx = parseInt(extras.index, 10);
+      if (Number.isFinite(idx) && idx >= 0) start = Math.floor(idx / CHUNK_SIZE) * CHUNK_SIZE;
+    }
     const end = c === chunks ? total : Math.min(start + CHUNK_SIZE, total); // last chunk uncapped
     return json({ metas: metas.slice(start, end) });
   }
