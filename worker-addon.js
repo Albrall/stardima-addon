@@ -306,17 +306,43 @@ function indexRows() {
   }
   return _rows;
 }
+// one edit is enough to fix the usual Arabic typos (كونا ↔ كونان, سندباد ↔ سند باد)
+function withinOne(a, b) {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (a.length < b.length) j++;
+    else { i++; j++; }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
 function searchIndex(q) {
   const nq = normTitle(q);
   if (nq.length < 2) return [];
   const out = [];
+  const loose = [];
+  const words = nq.split(' ').filter(Boolean);
   for (const r of indexRows()) {
     const i = r.n.indexOf(nq);
-    if (i < 0) continue;
-    out.push({ id: r.type + ':' + r.slug, type: r.type, slug: r.slug, title: r.title,
-      poster: decodePoster(r.poster) || undefined, year: r.year || undefined });
+    if (i >= 0) {
+      out.push({ id: r.type + ':' + r.slug, type: r.type, slug: r.slug, title: r.title,
+        poster: decodePoster(r.poster) || undefined, year: r.year || undefined, contains: true });
+      continue;
+    }
+    // typo tolerance: a word of the title within one edit of what was typed
+    if (nq.length < 4 || loose.length >= 40) continue;
+    const rw = r.n.split(' ').filter(Boolean);
+    const near = words.length === 1
+      ? rw.some((w) => withinOne(w, nq))
+      : words.every((w) => rw.some((t) => withinOne(t, w)));
+    if (near) loose.push({ id: r.type + ':' + r.slug, type: r.type, slug: r.slug, title: r.title,
+      poster: decodePoster(r.poster) || undefined, year: r.year || undefined, fuzzy: true });
   }
-  return out;
+  return out.concat(loose); // exact hits first, near-misses after
 }
 // Site results win when both know a title; the index adds everything the site
 // search misses (odd spellings, long-tail titles, or the site being down).
@@ -326,10 +352,18 @@ function mergeSearch(site, q) {
     const type = x.type || 'series';
     out.set(type + ':' + (x.slug || x.id), { ...x, type });
   }
-  for (const x of searchIndex(q)) if (!out.has(x.id)) out.set(x.id, x);
+  // the site's row for a work wins, but the local index knows whether the title really
+  // contains what was typed — carry that flag over so ranking stays honest
+  for (const x of searchIndex(q)) {
+    const cur = out.get(x.id);
+    if (!cur) { out.set(x.id, x); continue; }
+    if (x.contains) cur.contains = true;
+    else if (x.fuzzy && !cur.contains) cur.fuzzy = true;
+  }
   const nq = normTitle(q);
   const arr = [...out.values()];
-  for (const x of arr) x.q = normTitle(x.title).startsWith(nq) ? 0 : 1; // prefix hits first
+  // rank: title starts with what was typed → contains it → plain site hit → near-miss
+  for (const x of arr) x.q = x.fuzzy ? 3 : normTitle(x.title).startsWith(nq) ? 0 : x.contains ? 1 : 2;
   arr.sort((a, b) => a.q - b.q || byTitleAr(a.title, b.title));
   return arr.slice(0, 150);
 }
@@ -855,12 +889,22 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       }
       // one row per work: their 1080p copy wins only when we have no series for it
       const jcHits = [];
-      if (type === 'series') {
+      {
         const nq = normTitle(q);
-        for (const x of jcSeries()) if (normTitle(x.title).indexOf(nq) >= 0) jcHits.push({ id: 'jcseries-' + x.id, type: 'series', title: x.title, poster: x.poster, jc: true, eps: (x.episodes || []).length });
-      } else {
-        const nq = normTitle(q);
-        for (const x of jcMovies()) if (normTitle(x.title).indexOf(nq) >= 0) jcHits.push({ id: 'jcartoon-' + x.id, type: 'movie', title: x.title, poster: x.poster, jc: true });
+        const looseOk = nq.length >= 4;
+        const hit = (t) => {
+          const n = normTitle(t);
+          if (n.indexOf(nq) >= 0) return true;
+          if (!looseOk) return false;
+          const nw = n.split(' ').filter(Boolean);
+          return nw.some((w) => withinOne(w, nq)) ||
+                 nq.split(' ').filter(Boolean).every((w) => nw.some((t2) => withinOne(t2, w)));
+        };
+        if (type === 'series') {
+          for (const x of jcSeries()) if (hit(x.title)) jcHits.push({ id: 'jcseries-' + x.id, type: 'series', title: x.title, poster: x.poster, jc: true, eps: (x.episodes || []).length });
+        } else {
+          for (const x of jcMovies()) if (hit(x.title)) jcHits.push({ id: 'jcartoon-' + x.id, type: 'movie', title: x.title, poster: x.poster, jc: true });
+        }
       }
       const merged = [];
       const stardimaByTitle = new Map();
