@@ -552,7 +552,7 @@ async function buildManifest(url) {
     id: ID, version: VERSION, name: NAME,
     description: 'مكتبة كرتون كاملة مرتبة أبجديًا — ' + sN + ' مسلسل و' + mN + ' فيلم، مع الحلقات وبث مباشر',
     resources: ['catalog', 'meta', 'stream'], types: ['series', 'movie'],
-    idPrefixes: ['stardima:'], catalogs: [...series, ...movies],
+    idPrefixes: ['stardima:', 'jcseries-', 'jcartoon-', 'jcartoon:'], catalogs: [...series, ...movies],
     behaviorHints: { configurableFor: false, configurationRequired: false },
   };
 }

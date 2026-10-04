@@ -55,6 +55,10 @@ async function matchOne(ours) {
   const tries = [ours.title];
   const c = clean(ours.title);
   if (c && c !== norm(ours.title)) tries.push(c);
+  const noNum = c.replace(/^[\d\u0660-\u0669]+\s*/, '').trim();   // "100 فعل قبل الثانوية" → "فعل قبل الثانوية"
+  if (noNum && noNum !== c && noNum.length > 2) tries.push(noNum);
+  const latin = String(ours.title).match(/[A-Za-z][A-Za-z0-9 ':\-]{3,}/);
+  if (latin) { const l = latin[0].trim(); if (l !== ours.title) tries.push(l); }
   let best = null;
   for (const q of tries) {
     const j = await api('/search/multi', { query: q, language: 'ar-SA', include_adult: 'false' });
