@@ -384,6 +384,10 @@ function keyTitle(t) {
     .trim();
 }
 
+// Their "series" list hides films: anything holding exactly one video is a film, not a
+// show, and it belongs in the movies catalogue (it stays playable through the same id).
+function jcFilmLike(x) { return !!x && ((x.episodes || []).length <= 1); }
+
 // Every jcartoon work that we do NOT already carry, as one card. Works we do carry get
 // their 1080p copy interleaved into our own entry (jcFirst), so nothing appears twice.
 function jcStandalone(kind) {
@@ -392,8 +396,20 @@ function jcStandalone(kind) {
   const jc = (INDEX.jcartoon) || {};
   const mapped = new Set();
   for (const m of [jc.smap || {}, jc.map || {}]) for (const k of Object.keys(m)) if (m[k] && m[k].id) mapped.add(m[k].id);
-  const list = kind === 'series' ? jcSeries() : jcMovies();
-  return list.filter((x) => x && x.id && !mapped.has(x.id) && !titles.has(keyTitle(x.title)));
+  const out = [], seen = new Set();
+  const push = (x) => {
+    if (!x || !x.id || mapped.has(x.id)) return;
+    const k = keyTitle(x.title);
+    if (!k || titles.has(k) || seen.has(k)) return; // duplicate of ours, or of itself
+    seen.add(k); out.push(x);
+  };
+  if (kind === 'series') {
+    for (const x of jcSeries()) if (!jcFilmLike(x)) push(x);
+  } else {
+    for (const x of jcMovies()) push(x);
+    for (const x of jcSeries()) if (jcFilmLike(x)) push(x); // films listed as series
+  }
+  return out;
 }
 function jcCard(x, type) {
   return {
@@ -874,7 +890,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       }
       const it = jcMovieOf(jcm.id) || jcSeriesOf(jcm.id); // be forgiving about type mix-ups
       if (!it) return notFound();
-      if (it.episodes) {
+      if (it.episodes && (type !== 'movie' || (it.episodes || []).length > 1)) {
         const videos = (it.episodes || []).map((e, i) => ({
           id: 'jcseries-' + it.id + ':' + (e[2] || 1) + ':' + (e[1] || i + 1),
           title: 'الحلقة ' + (e[1] || i + 1),
@@ -885,7 +901,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       return json({ meta: {
         id: 'jcartoon-' + it.id, type: 'movie', name: it.title,
         poster: it.poster || undefined, description: it.desc || undefined,
-        genres: ['جي كرتون', it.genre].filter(Boolean),
+        genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean),
       } });
     }
     const slug = decodeURIComponent(m[2]).replace(/^stardima:/, '').split(':')[0];
