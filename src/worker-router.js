@@ -356,14 +356,24 @@ function chunkCount(key) {
 // Their API signs a fresh HLS link per request, so nothing is cached here: the
 // addon asks jcartoon for a link the moment you press play, exactly like the
 // site does. Entries are single videos (films / specials), served as movie type.
+// rating + overview come from the TMDB link-up (src/build-ratings.js). Inert until the
+// file exists, so the add-on behaves exactly as before when there is nothing to show.
+function rOf(id) {
+  const it = INDEX.ratings && INDEX.ratings.items && INDEX.ratings.items[id];
+  return it || null;
+}
+function ratingTag(v) { return v && v.vote ? '★' + v.vote : ''; }
+
 function qOf(slug) {
   const q = INDEX.quality && INDEX.quality.items && INDEX.quality.items[slug];
   return q && q.h ? q.h : 0;
 }
-function relInfo(year, h) {
+function relInfo(year, h, r) {
   const bits = [];
   if (year) bits.push(String(year));
   if (h) bits.push(h + 'p');
+  const tag = ratingTag(r);
+  if (tag) bits.push(tag);
   return bits.length ? bits.join(' · ') : undefined;
 }
 
@@ -405,10 +415,12 @@ function jcStandalone(kind) {
   return out;
 }
 function jcCard(x, type) {
+  const key = (type === 'series' ? 'jcseries-' : 'jcartoon-') + x.id;
+  const r = rOf(key);
   return {
-    id: (type === 'series' ? 'jcseries-' : 'jcartoon-') + x.id,
+    id: key,
     type, name: x.title, poster: x.poster || undefined,
-    releaseInfo: '1080p',
+    releaseInfo: (r && r.vote ? '1080p · ★' + r.vote : '1080p'),
     description: x.desc || undefined,
   };
 }
@@ -794,7 +806,8 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         metas.push({
           id, type, name: x.title,
           poster: x.poster || undefined,
-          releaseInfo: relInfo(x.year, x.jc ? 1080 : qOf(primarySlug(x.slug || x.id))),
+          releaseInfo: relInfo(x.year, x.jc ? 1080 : qOf(primarySlug(x.slug || x.id)),
+            x.jc ? rOf(x.id) : rOf('stardima:' + primarySlug(x.slug || x.id))),
           description: x.jc ? 'جودة ١٩٢٠×١٠٨٠ — FULL HD' : undefined,
         });
       }
@@ -807,7 +820,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       return {
         id: 'stardima:' + ps, type, name: it[1],
         poster: decodePoster(it[2]) || undefined,
-        releaseInfo: relInfo(it[3], qOf(ps) || qOf(it[0])),
+        releaseInfo: relInfo(it[3], qOf(ps) || qOf(it[0]), rOf('stardima:' + ps) || rOf('stardima:' + it[0])),
       };
     };
     // measured-quality shelf: everything we probed at 720p or better, best first
@@ -875,9 +888,11 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           title: 'الحلقة ' + (e[1] || i + 1),
           season: e[2] || 1, episode: e[1] || i + 1, episodeId: e[0],
         }));
+        const rrS = rOf('jcseries-' + it.id);
         return json({ meta: {
           id: 'jcseries-' + it.id, type: 'series', name: it.title,
-          poster: it.poster || undefined, description: it.desc || undefined,
+          poster: it.poster || undefined,
+          description: (rrS ? (rrS.vote ? `★ ${rrS.vote}/10 من TMDB\n` : '') + (rrS.overview ? rrS.overview + '\n' : '') : '') + (it.desc || ''),
           genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean), videos,
         } });
       }
@@ -891,9 +906,11 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         }));
         return json({ meta: { id: 'jcseries-' + it.id, type: 'series', name: it.title, poster: it.poster || undefined, description: it.desc || undefined, genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean), videos } });
       }
+      const rrM = rOf('jcartoon-' + it.id);
       return json({ meta: {
         id: 'jcartoon-' + it.id, type: 'movie', name: it.title,
-        poster: it.poster || undefined, description: it.desc || undefined,
+        poster: it.poster || undefined,
+        description: (rrM ? (rrM.vote ? `★ ${rrM.vote}/10 من TMDB\n` : '') + (rrM.overview ? rrM.overview + '\n' : '') : '') + (it.desc || ''),
         genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean),
       } });
     }
@@ -907,6 +924,12 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const gs = genreBreakdown(slug); if (gs.length) meta.genres = gs;
     const qh = qOf(slug);
     if (qh) meta.description = `الجودة الحقيقية: ${qh}p\n` + (meta.description || '');
+    const rr = rOf('stardima:' + slug);
+    if (rr) {
+      const head = rr.vote ? `★ ${rr.vote}/10 من TMDB\n` : '';
+      const body = rr.overview ? rr.overview + '\n' : '';
+      if (head || body) meta.description = head + body + (meta.description || '');
+    }
     // Show which versions this work has (dubbed / subbed / uncut …) on the entry itself.
     const fm = familyOf(slug);
     if (fm && fm.fam.members.length > 1) {
