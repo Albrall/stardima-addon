@@ -506,6 +506,26 @@ async function buildManifest(url) {
   const arabicNum = (n) => String(n).replace(/\d/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
   const searchExtra = [{ name: 'search', isRequired: false }];
   const qitems = (INDEX.quality && INDEX.quality.items) || {};
+  const topRatedCount = () => {
+    const count = (kind) => {
+      let n = 0;
+      const items = (((INDEX[kind] || {}).items) || []);
+      const seen = new Set();
+      for (const it of items) {
+        const ps = primarySlug(it[0]);
+        if (seen.has(ps)) continue;
+        seen.add(ps);
+        const r = rOf('stardima:' + ps) || rOf('stardima:' + it[0]);
+        if (r && r.vote && (r.votes || 0) >= 50) n++;
+      }
+      for (const x of jcStandalone(kind)) {
+        const r = rOf((kind === 'series' ? 'jcseries-' : 'jcartoon-') + x.id);
+        if (r && r.vote && (r.votes || 0) >= 50) n++;
+      }
+      return Math.min(n, 500);
+    };
+    return { s: count('series'), m: count('movies') };
+  };
   const jcHdCount = (kind) => {
     const key = kind === 'series' ? 'series' : 'movies';
     const ours = (((INDEX[key] || {}).items) || []).filter((it) => qitems[it[0]] && qitems[it[0]].h >= 720).length;
@@ -526,6 +546,9 @@ async function buildManifest(url) {
     const hdM = jcHdCount('movies');
     if (hdS) series.push({ id: 'stardima-hd', type: 'series', name: `${NAME}: ٧٢٠p فأعلى (${arabicNum(hdS)})`, extra: [...searchExtra] });
     if (hdM) movies.push({ id: 'stardima-hd-movies', type: 'movie', name: `${NAME}: أفلام ٧٢٠p فأعلى (${arabicNum(hdM)})`, extra: [...searchExtra] });
+    const topN = topRatedCount();
+    if (topN.s) series.push({ id: 'stardima-top', type: 'series', name: `${NAME}: الأعلى تقييمًا (${arabicNum(topN.s)})`, extra: [...searchExtra] });
+    if (topN.m) movies.push({ id: 'stardima-top-movies', type: 'movie', name: `${NAME}: أفلام الأعلى تقييمًا (${arabicNum(topN.m)})`, extra: [...searchExtra] });
   }
   // the second source is no longer a shelf of its own: its works sit inside the two
   // lists above (and the 720p shelves), and its 1080p copies lead inside our entries
@@ -823,6 +846,30 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         releaseInfo: relInfo(it[3], qOf(ps) || qOf(it[0]), rOf('stardima:' + ps) || rOf('stardima:' + it[0])),
       };
     };
+    // top-rated shelf: needs a real vote count, otherwise a 10.0 from three people wins
+    if (id === 'stardima-top' || id === 'stardima-top-movies') {
+      const key = id === 'stardima-top' ? 'series' : 'movies';
+      const minVotes = 50;
+      const rows = [];
+      for (const it of (((INDEX[key] || {}).items) || [])) {
+        if (isAlias(it[0])) continue;
+        const ps = primarySlug(it[0]);
+        const r = rOf('stardima:' + ps) || rOf('stardima:' + it[0]);
+        if (!r || !r.vote || (r.votes || 0) < minVotes) continue;
+        rows.push({ card: toMeta(it), vote: r.vote, votes: r.votes || 0 });
+      }
+      for (const x of jcStandalone(key)) {
+        const card = jcCard(x, type);
+        const r = rOf(card.id);
+        if (!r || !r.vote || (r.votes || 0) < minVotes) continue;
+        rows.push({ card, vote: r.vote, votes: r.votes || 0 });
+      }
+      rows.sort((a, b) => b.vote - a.vote || b.votes - a.votes || byTitleAr(a.card.name, b.card.name));
+      const q = (extras.search || '').trim();
+      const out = (q ? rows.filter((x) => normTitle(x.card.name).indexOf(normTitle(q)) >= 0) : rows).slice(0, 500);
+      return json({ metas: out.map((x) => x.card) });
+    }
+
     // measured-quality shelf: everything we probed at 720p or better, best first
     if (id === 'stardima-hd' || id === 'stardima-hd-movies') {
       const key = id === 'stardima-hd' ? 'series' : 'movies';

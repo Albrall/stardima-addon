@@ -10,15 +10,24 @@ const CONC = Number(process.env.CONC || 5);
 const CAP = Number(process.env.CAP || 0); // 0 = all
 const KEY = process.env.TMDB_API_KEY || '';
 
+const AR_DIGITS = '٠١٢٣٤٥٦٧٨٩';
 const norm = (s) => String(s || '')
   .normalize('NFKC')
+  .replace(/[٠-٩]/g, (d) => String(AR_DIGITS.indexOf(d)))
   .replace(/[\u064B-\u0652\u0640]/g, '')
   .replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ؤ/g, 'و').replace(/ئ/g, 'ي').replace(/ة/g, 'ه')
   .replace(/[^\p{L}\p{N}\s]/gu, ' ')
   .toLowerCase().replace(/\s+/g, ' ').trim();
 const clean = (s) => norm(s)
-  .replace(/\b(مسلسل|series|movie|film|فيلم|الفيلم|special|سبيشل|مترجم|مدبلج|كامل|كاملة|the)\b/g, ' ')
+  .replace(/\b(مسلسل|series|movie|film|فيلم|الفيلم|special|سبيشل|مترجم|مدبلج|كامل|كاملة|the|vol|volume|part|chapter|ep|episode)\b/g, ' ')
   .replace(/\s+/g, ' ').trim();
+// comparison form: also drops the Arabic article so "للمستقبل" and "المستقبل" meet
+const light = (s) => clean(s)
+  .split(' ')
+  .map((w) => w.replace(/^(ال|لل|بال|وال|فال)/, ''))
+  .filter((w) => w && w.length > 1)
+  .sort()
+  .join(' ');
 
 function api(pathname, params) {
   const u = new URL('https://api.themoviedb.org/3' + pathname);
@@ -35,32 +44,100 @@ function api(pathname, params) {
 
 // candidates come back with a matching score; we only accept a confident pair so the
 // add-on never shows the rating of a lookalike show
-function score(ours, cand, kind) {
+function score(ours, cand, kind, aliases) {
+  // an alias (usually the English title from Wikipedia) counts as a same-name hit
+  if (aliases && aliases.length) {
+    const candNames = [cand.name, cand.original_name, cand.title, cand.original_title].filter(Boolean).map(norm);
+    const hit = aliases.some((a) => { const n = norm(a); return n && candNames.includes(n); });
+    if (hit) {
+      const candSeries = cand.media_type ? cand.media_type === 'tv' : kind === 'series';
+      if (cand.media_type && candSeries !== (kind === 'series')) return -1;
+      if (!cand.overview && !cand.vote_count) return -1;
+      const oy = Number(String(ours.year || '').slice(0, 4)) || 0;
+      const cy = Number(String(cand.first_air_date || cand.release_date || '').slice(0, 4)) || 0;
+      if (oy >= 1910 && cy > 0 && Math.abs(cy - oy) > 2) return -1;   // alias needs the year to agree
+      return 3.5;
+    }
+  }
   const wantSeries = kind === 'series';
   const candSeries = cand.media_type ? cand.media_type === 'tv' : wantSeries;
   if (cand.media_type && candSeries !== wantSeries) return -1;
-  const names = [cand.name, cand.title, cand.original_name, cand.original_title].filter(Boolean).map(norm);
-  const ours_ = clean(ours.title);
+  if (!cand.overview && !cand.vote_count) return -1;      // nothing to show anyway
+  const names = [cand.name, cand.title, cand.original_name, cand.original_title].filter(Boolean);
+  const ourN = norm(ours.title), ourC = clean(ours.title), ourL = light(ours.title);
   let titleHit = 0;
-  for (const n of names) if (n === norm(ours.title) || n === ours_) { titleHit = 2; break; }
-  if (!titleHit) for (const n of names) if (n && (n.indexOf(ours_) >= 0 || ours_.indexOf(n) >= 0) && ours_.length > 3) { titleHit = 1; break; }
+  for (const raw of names) {
+    const n = norm(raw);
+    if (n === ourN || n === ourC) { titleHit = 2; break; }               // same title exactly
+  }
+  if (!titleHit) {
+    for (const raw of names) {
+      const l = light(raw);
+      if (!l) continue;
+      const a = l.split(' '), b = ourL.split(' ');
+      const same = a.length === b.length && a.every((w, i) => w === b[i]);
+      if (same && a.length >= 2) { titleHit = 1.5; break; }              // same words, different articles
+      if (same && a.length === 1 && a[0].length >= 6) { titleHit = 1.5; break; }
+    }
+  }
+  if (!titleHit) {                                                       // one name inside the other
+    for (const raw of names) {
+      const n = clean(raw);
+      if (n && ourC && n.length > 3 && (n.indexOf(ourC) >= 0 || ourC.indexOf(n) >= 0)) { titleHit = 1; break; }
+    }
+  }
   if (!titleHit) return -1;
+  const ourYear = Number(String(ours.year || '').slice(0, 4)) || 0;
   const candYear = Number(String(cand.first_air_date || cand.release_date || '').slice(0, 4)) || 0;
-  const yearOk = !ours.year || !candYear ? 0.5 : Math.abs(candYear - Number(String(ours.year).slice(0, 4))) <= 1 ? 1 : 0;
-  if (yearOk === 0) return -1;
-  return titleHit * 2 + yearOk;
+  const known = ourYear >= 1910 && candYear > 0;
+  if (!known) return titleHit * 2 + 0.5;
+  const diff = Math.abs(candYear - ourYear);
+  if (diff <= 1) return titleHit * 2 + 1;
+  if (titleHit >= 2) return titleHit * 2 - 0.5;   // exact title, our row/metadata year disagrees
+  return -1;
+}
+
+// The long tail of Arabic titles simply is not in TMDB's search index. Wikipedia is: we
+// look the Arabic name up there, follow the English interlanguage link, and use that name
+// to find the same work in TMDB. The TMDB side still has to agree on media type and year.
+async function wikiEnglish(title) {
+  const H = { 'User-Agent': 'karton-zaman-addon/1.0 (addon ratings link-up)' };
+  const u = new URL('https://ar.wikipedia.org/w/api.php');
+  u.search = new URLSearchParams({ action: 'query', list: 'search', srsearch: String(title), srlimit: '3', format: 'json' }).toString();
+  let j;
+  try { j = await fetch(u, { headers: H }).then((r) => r.json()); } catch (e) { return null; }
+  const hits = (j && j.query && j.query.search) || [];
+  if (!hits.length) return null;
+  const pick = hits.find((h) => light(h.title) === light(title)) || (light(hits[0].title).split(' ').some((w) => light(title).split(' ').includes(w)) ? hits[0] : null);
+  if (!pick) return null;
+  const u2 = new URL('https://ar.wikipedia.org/w/api.php');
+  u2.search = new URLSearchParams({ action: 'query', titles: pick.title, prop: 'langlinks', lllang: 'en', format: 'json', redirects: '1' }).toString();
+  try {
+    const j2 = await fetch(u2, { headers: H }).then((r) => r.json());
+    const pages = (j2 && j2.query && j2.query.pages) || {};
+    for (const k of Object.keys(pages)) {
+      const ll = (pages[k].langlinks || [])[0];
+      if (ll && ll['*']) return String(ll['*']).replace(/\s*\([^)]*\)\s*$/, '').trim(); // "Thunderbirds Are Go (TV series)"
+    }
+  } catch (e) { /* none */ }
+  return null;
 }
 
 async function matchOne(ours) {
-  const tries = [ours.title];
+  // TMDB's Arabic index is picky: the same title with the article ("ال") attached, or
+  // with a trailing number, can return nothing. So we ask with a few shapes of the same
+  // name and keep whatever scores highest — the scoring itself stays strict, so a loose
+  // search can never produce a loose match.
   const c = clean(ours.title);
-  if (c && c !== norm(ours.title)) tries.push(c);
-  const noNum = c.replace(/^[\d\u0660-\u0669]+\s*/, '').trim();   // "100 فعل قبل الثانوية" → "فعل قبل الثانوية"
-  if (noNum && noNum !== c && noNum.length > 2) tries.push(noNum);
-  const latin = String(ours.title).match(/[A-Za-z][A-Za-z0-9 ':\-]{3,}/);
-  if (latin) { const l = latin[0].trim(); if (l !== ours.title) tries.push(l); }
+  const noArt = c.split(' ').map((w) => w.replace(/^(ال|لل)/, '')).join(' ').trim();
+  const noNum = c.replace(/\s*\d+\s*$/, '').trim();
+  const two = c.split(' ').slice(0, 2).join(' ');
+  const latin = (String(ours.title).match(/[A-Za-z][A-Za-z0-9 ':\-]{3,}/) || [''])[0].trim();
+  const cands = [ours.title, c, noArt, noNum, noNum !== c ? noArt.replace(/\s*\d+\s*$/, '').trim() : '', two, latin];
+  const seen = new Set();
+  const queries = cands.filter((q) => { const k = (q || '').toLowerCase().trim(); if (!k || k.length < 3 || seen.has(k)) return false; seen.add(k); return true; }).slice(0, 5);
   let best = null;
-  for (const q of tries) {
+  for (const q of queries) {
     const j = await api('/search/multi', { query: q, language: 'ar-SA', include_adult: 'false' });
     if (!j || !Array.isArray(j.results)) continue;
     for (const cand of j.results) {
@@ -69,6 +146,17 @@ async function matchOne(ours) {
       if (s > 0 && (!best || s > best.s)) best = { s, cand };
     }
     if (best && best.s >= 3.5) break;
+  }
+  if (!best || best.s < 3) {
+    const en = await wikiEnglish(ours.title);
+    if (en && norm(en) !== norm(ours.title)) {
+      const j = await api('/search/multi', { query: en, language: 'ar-SA', include_adult: 'false' });
+      for (const cand of ((j && j.results) || [])) {
+        if (cand.media_type === 'person') continue;
+        const s = score(ours, cand, ours.kind, [en]);
+        if (s > 0 && (!best || s > best.s)) best = { s, cand, via: 'wiki:' + en };
+      }
+    }
   }
   if (!best || best.s < 3) return null;
   const t = best.cand;
@@ -79,6 +167,7 @@ async function matchOne(ours) {
     vote: typeof t.vote_average === 'number' && t.vote_average > 0 ? Math.round(t.vote_average * 10) / 10 : undefined,
     votes: t.vote_count || undefined,
     overview: (t.overview || '').trim() || undefined,
+    via: best.via,
   };
   if (!out.vote && !out.overview) return null;
   return out;
@@ -110,7 +199,8 @@ function save(state) {
   } catch (e) { /* optional */ }
 
   const state = loadState();
-  let todo = ours.filter((o) => !(o.key in state.done));
+  const RETRY = process.env.RETRY_MISS === '1';
+  let todo = ours.filter((o) => !(o.key in state.done) || (RETRY && state.done[o.key] === null));
   if (CAP) todo = todo.slice(0, CAP);
   console.log(`  الإجمالي ${ours.length} · مخلص ${ours.length - todo.length} · متبقي ${todo.length}`);
   let i = 0, hits = 0, n = 0;
