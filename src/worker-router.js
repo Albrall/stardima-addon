@@ -537,6 +537,43 @@ function jcStreams(fresh, origin, label, group) {
   ];
 }
 
+// ---- direct-copy fallback -------------------------------------------------
+// Some hosts block the cloud (and block players that do not look like Chrome).
+// dima.json holds a third source whose files are plain MP4s with CORS "*", so the
+// device fetches them itself — nothing of ours sits in the media path. It is a
+// lifeboat: only offered when the embedded hosts cannot be played.
+function dimaEpisode(slug, season, episode) {
+  const D = INDEX.dima;
+  if (!D || !D.series || !D.map) return null;
+  const i = D.map[slug];
+  if (i == null) return null;
+  const s = D.series[i];
+  if (!s || !s.parts) return null;
+  const want = parseInt(episode, 10);
+  if (!want || want < 1) return null;
+  // Their numbering restarts every part (الجزء), so a season number is the honest
+  // key when we have one; otherwise count through the parts in order and take the
+  // n-th file — never a guess at a part that does not hold that episode.
+  const flat = [];
+  for (const p of s.parts) for (const n of p.e) flat.push({ p, n });
+  const sea = parseInt(season, 10);
+  let hit = sea > 1 ? flat.find((x) => x.p.p === sea && x.n === want) : null;
+  if (!hit) hit = flat[want - 1];
+  if (!hit) return null;
+  const file = (hit.p.x && hit.p.x[hit.n]) || `${hit.p.f}-${hit.n}.mp4`;
+  return `${hit.p.b}${file}`;
+}
+function dimaStreams(slug, season, episode) {
+  const u = dimaEpisode(slug, season, episode);
+  if (!u) return [];
+  return [{
+    name: '٣٦٠p · ✓ يعمل',
+    title: `الحلقة ${episode} — نسخة مباشرة تعمل`,
+    url: u,
+    behaviorHints: { bingeGroup: 'direct' },
+  }];
+}
+
 // ---- manifest -------------------------------------------------------------
 // Filtering/sorting shared by the plain catalogues: 'جودة' (quality floor) and
 // 'ترتيب' (newest / best quality / highest rating) as Nuvio extras.
@@ -1256,14 +1293,16 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           continue;
         }
         list = await orderServers((result && result.servers) || [], {
-          maxProbe: 4,
-          verifyBudget: 1500, // wait briefly so the server list comes back verified
+          maxProbe: 5,
+          verifyBudget: 6000, // wait for the real answer: resolve + first bytes
           waitUntil: (pr) => { try { _ctx && _ctx.waitUntil(pr); } catch (e) { /* no ctx */ } },
         });
         if (list.length) _cache.set(ck, { t: Date.now(), v: list });
       }
       const qh = qOf(t.memberSlug); // the measured ceiling for this copy of the work
       for (const srv of (list || [])) {
+        // a host we just proved dead is not offered at all — tapping it only wastes your time
+        if (serverHealth(srv) === 'bad') continue;
         const edgeDead = DEAD_FROM_EDGE.test((srv.name || '') + ' ' + (srv.embedUrl || ''));
         const bits = [];
         if (t.label) bits.push(t.label);
@@ -1280,7 +1319,23 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         });
       }
     }
-        return json({ streams: jcFirst.concat(collected) });
+    // Lifeboat: a plain MP4 the device can fetch itself, when this work has one.
+    let direct = [];
+    try {
+      if (type === 'series') {
+        let epNo = null, season = 1;
+        const mm = await getSeriesMeta(slug);
+        const v = ((mm && mm.videos) || []).find((x) => String(x.episodeId || String(x.id).split(':').pop()) === String(useEpId));
+        if (v) { epNo = v.episode || null; season = v.season || 1; }
+        if (epNo == null) {
+          const all = (mm && mm.videos) || [];
+          const at = all.findIndex((x) => String(x.episodeId || String(x.id).split(':').pop()) === String(useEpId));
+          if (at >= 0) epNo = at + 1;
+        }
+        if (epNo != null) direct = dimaStreams(slug, season, epNo);
+      }
+    } catch (e) { /* no direct copy for this one */ }
+    return json({ streams: jcFirst.concat(collected).concat(direct) });
   }
 
 
@@ -1290,7 +1345,11 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     if (!embedUrl) return textResponse('missing embed', 400);
     const origin = url.origin;
     let lastStatus = 0;
-    for (let attempt = 0; attempt < 4; attempt++) {
+    // Hosts refuse in bursts: hammering them four times in the same second never
+    // helps, so the retries are spread out instead.
+    const backoff = [0, 500, 1300, 2600, 4000];
+    for (let attempt = 0; attempt < backoff.length; attempt++) {
+      if (backoff[attempt]) await new Promise((r) => setTimeout(r, backoff[attempt]));
       try {
         const r = await resolveHost(embedUrl);
         if (!r || !r.url) { lastStatus = 404; continue; }

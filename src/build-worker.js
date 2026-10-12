@@ -21,7 +21,7 @@ function rewrite(code, fromId) {
 
 // worker-router.js contains `const INDEX = /*__INDEX__*/{};` — inject the real index
 const idx = JSON.parse(fs.readFileSync(path.join(ROOT, 'catalog-index.min.json'), 'utf8'));
-let genres = null, ourGenres = null, families = null, jcartoon = null, quality = null, ratings = null;
+let genres = null, ourGenres = null, families = null, jcartoon = null, quality = null, ratings = null, dima = null;
 try { ratings = JSON.parse(fs.readFileSync(path.join(ROOT, 'ratings.json'), 'utf8')); } catch (e) { /* optional */ }
 try { quality = JSON.parse(fs.readFileSync(path.join(ROOT, 'quality.json'), 'utf8')); } catch (e) { /* optional */ }
 try { families = JSON.parse(fs.readFileSync(path.join(ROOT, 'families.json'), 'utf8')); } catch (e) { /* optional */ }
@@ -31,11 +31,13 @@ let jcMap = null, jcSmap = null;
 try { jcMap = JSON.parse(fs.readFileSync(path.join(ROOT, 'jc-map.json'), 'utf8')).items; } catch (e) { /* optional */ }
 try { jcSmap = JSON.parse(fs.readFileSync(path.join(ROOT, 'jc-smap.json'), 'utf8')).items; } catch (e) { /* optional */ }
 try { ourGenres = JSON.parse(fs.readFileSync(path.join(ROOT, 'our-genres.json'), 'utf8')); } catch (e) { /* optional */ }
+try { dima = JSON.parse(fs.readFileSync(path.join(ROOT, 'dima.json'), 'utf8')); } catch (e) { /* optional */ }
 const indexLiteral = JSON.stringify({ built: idx.built, series: idx.series, movies: idx.movies, genres: genres && { labels: genres.labels, items: genres.items }, ourGenres: ourGenres && { labels: ourGenres.labels, items: ourGenres.items },
                     families: families && { families: families.families, memberOf: families.memberOf, epMap: families.epMap, lang: families.lang },
                     jcartoon: jcartoon && { series: jcartoon.series, movies: jcartoon.movies, built: jcartoon.built, map: jcMap || {}, smap: jcSmap || {} },
                     quality: quality && { measured: quality.measured, items: quality.items },
-                    ratings: ratings && { measured: ratings.measured, items: ratings.items } });
+                    ratings: ratings && { measured: ratings.measured, items: ratings.items },
+                    dima: dima && { base: dima.base, series: dima.series, map: dima.map } });
 function prep(f) {
   let code = fs.readFileSync(path.join(ROOT, f), 'utf8');
   if (f === 'worker-router.js') {

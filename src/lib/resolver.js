@@ -115,7 +115,7 @@ function hostRank(srv) {
 // the *next* request is already correct.
 const _health = new Map(); // hostname -> { ok: boolean, t: number }
 const HEALTH_OK_TTL = 30 * 60 * 1000;
-const HEALTH_FAIL_TTL = 10 * 60 * 1000;
+const HEALTH_FAIL_TTL = 2 * 60 * 1000; // short: these hosts come and go by the minute
 
 function hostKeyOf(srv) {
   try { return new URL(srv.embedUrl).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
@@ -126,14 +126,29 @@ function healthPenalty(srv) {
   if (Date.now() - h.t > (h.ok ? HEALTH_OK_TTL : HEALTH_FAIL_TTL)) return 0;
   return h.ok ? -0.5 : 20; // known-good floats up, known-dead sinks (no exceptions)
 }
+// A host counts as healthy only when the whole chain answers: embed -> resolved
+// file -> the first bytes. Resolving alone is not enough — several hosts hand out
+// a link and then refuse it (403) the moment the player actually opens it.
+async function fetchWith(url, opts, ms) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
+  finally { clearTimeout(to); }
+}
+async function verifyServer(srv, ms = 9000) {
+  const r = await resolveHost(srv.embedUrl);
+  if (!r || !r.url) return false;
+  const res = await fetchWith(r.url, { headers: { 'User-Agent': UA, Referer: r.referer, Accept: '*/*', Range: 'bytes=0-1000' } }, ms);
+  return !!(res && (res.ok || res.status === 206));
+}
 function probeServers(servers, slots) {
   const jobs = [];
   for (const srv of servers.slice(0, slots || 3)) {
     const key = hostKeyOf(srv);
     if (!key || !/^https?:/i.test(srv.embedUrl || '')) continue;
     jobs.push(
-      resolveHost(srv.embedUrl)
-        .then((r) => { _health.set(key, { ok: !!(r && r.url), t: Date.now() }); })
+      verifyServer(srv)
+        .then((ok) => { _health.set(key, { ok: !!ok, t: Date.now() }); })
         .catch(() => { _health.set(key, { ok: false, t: Date.now() }); })
     );
   }
