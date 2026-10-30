@@ -21,6 +21,11 @@ function rewrite(code, fromId) {
 
 // worker-router.js contains `const INDEX = /*__INDEX__*/{};` — inject the real index
 const idx = JSON.parse(fs.readFileSync(path.join(ROOT, 'catalog-index.min.json'), 'utf8'));
+const idsData = JSON.parse(fs.readFileSync(path.join(ROOT, 'ids.json'), 'utf8'));
+const idsPacked = Object.entries(idsData.map || {}).map(([k, v]) => {
+  const digits = v.slice(2);
+  return k + '=' + digits.length + Number(digits).toString(36);
+}).join(',');
 let genres = null, ourGenres = null, families = null, jcartoon = null, quality = null, ratings = null, dima = null;
 try { ratings = JSON.parse(fs.readFileSync(path.join(ROOT, 'ratings.json'), 'utf8')); } catch (e) { /* optional */ }
 try { quality = JSON.parse(fs.readFileSync(path.join(ROOT, 'quality.json'), 'utf8')); } catch (e) { /* optional */ }
@@ -32,6 +37,50 @@ try { jcMap = JSON.parse(fs.readFileSync(path.join(ROOT, 'jc-map.json'), 'utf8')
 try { jcSmap = JSON.parse(fs.readFileSync(path.join(ROOT, 'jc-smap.json'), 'utf8')).items; } catch (e) { /* optional */ }
 try { ourGenres = JSON.parse(fs.readFileSync(path.join(ROOT, 'our-genres.json'), 'utf8')); } catch (e) { /* optional */ }
 try { dima = JSON.parse(fs.readFileSync(path.join(ROOT, 'dima.json'), 'utf8')); } catch (e) { /* optional */ }
+let tmdbState = null;
+try { tmdbState = JSON.parse(fs.readFileSync(path.join(ROOT, 'meta-tmdb-state.json'), 'utf8')).results || {}; } catch (e) { tmdbState = {}; }
+let apiSeries = {};
+try { apiSeries = JSON.parse(fs.readFileSync(path.join(ROOT, 'api-series-resolved.json'), 'utf8')); } catch (e) { apiSeries = {}; }
+let semanticDeny = {};
+try { semanticDeny = JSON.parse(fs.readFileSync(path.join(ROOT, 'semantic-deny.json'), 'utf8')); } catch (e) { semanticDeny = {}; }
+// Compact bidirectional TMDB table: t/m + base36 id = local key.
+const tmdbByKey = {};
+for (const k in ((ratings && ratings.items) || {})) {
+  const r = ratings.items[k]; if (!r || !r.id) continue;
+  tmdbByKey[k.replace(/^stardima:/, '')] = (r.media === 'movie' ? 'm' : 't') + Number(r.id).toString(36);
+}
+for (const k in tmdbState) {
+  if (tmdbByKey[k] || !tmdbState[k] || !tmdbState[k].tmdb) continue;
+  const [media, id] = tmdbState[k].tmdb.split('/');
+  if (id) tmdbByKey[k] = (media === 'movie' ? 'm' : 't') + Number(id).toString(36);
+}
+for (const k in apiSeries) {
+  const a = apiSeries[k];
+  if (tmdbByKey[k] || !a || !a.tmdb || (a.score || 0) < 0.8) continue;
+  const [media, id] = a.tmdb.split('/');
+  if (id) tmdbByKey[k] = (media === 'movie' ? 'm' : 't') + Number(id).toString(36);
+}
+// Never expose a movie TMDB id on a series card (or vice versa): Nuvio asks by
+// both type and id, so a mismatched media type can never resolve correctly.
+const seriesSlugs = new Set((idx.series && idx.series.items || []).map(x => x[0]));
+const movieSlugs = new Set((idx.movies && idx.movies.items || []).map(x => x[0]));
+for (const k in tmdbByKey) {
+  if (semanticDeny[k]) { delete tmdbByKey[k]; continue; }
+  const movieId = tmdbByKey[k][0] === 'm';
+  const isSeries = seriesSlugs.has(k) || k.startsWith('jcseries-');
+  const isMovie = movieSlugs.has(k) || k.startsWith('jcartoon-');
+  if ((isSeries && movieId) || (isMovie && !movieId)) delete tmdbByKey[k];
+}
+// One external TMDB id may have been assigned to duplicate uploads. Keep exactly
+// one route, preferring the work without an IMDb id (otherwise it would be unreachable).
+const tmdbGroups = {};
+for (const k in tmdbByKey) (tmdbGroups[tmdbByKey[k]] ||= []).push(k);
+for (const keys of Object.values(tmdbGroups)) {
+  if (keys.length < 2) continue;
+  const keep = keys.find(k => !(idsData.map || {})[k]) || keys[0];
+  for (const k of keys) if (k !== keep) delete tmdbByKey[k];
+}
+const tmdbPacked = Object.entries(tmdbByKey).map(([k, v]) => k + '=' + v).join(',');
 const indexLiteral = JSON.stringify({ built: idx.built, series: idx.series, movies: idx.movies, genres: genres && { labels: genres.labels, items: genres.items }, ourGenres: ourGenres && { labels: ourGenres.labels, items: ourGenres.items },
                     families: families && { families: families.families, memberOf: families.memberOf, epMap: families.epMap, lang: families.lang },
                     jcartoon: jcartoon && { series: jcartoon.series, movies: jcartoon.movies, built: jcartoon.built, map: jcMap || {}, smap: jcSmap || {} },
@@ -43,6 +92,10 @@ function prep(f) {
   if (f === 'worker-router.js') {
     if (!code.includes('/*__INDEX__*/{}')) throw new Error('index placeholder missing in worker-router.js');
     code = code.replace('/*__INDEX__*/{}', indexLiteral);
+    if (!code.includes("/*__IDS__*/''")) throw new Error('ids placeholder missing in worker-router.js');
+    code = code.replace("/*__IDS__*/''", JSON.stringify(idsPacked));
+    if (!code.includes("/*__TMDB__*/''")) throw new Error('tmdb placeholder missing in worker-router.js');
+    code = code.replace("/*__TMDB__*/''", JSON.stringify(tmdbPacked));
   }
   return rewrite(code, f);
 }

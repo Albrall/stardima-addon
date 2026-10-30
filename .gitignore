@@ -1,7 +1,14 @@
 node_modules/
+.env
+.env.*
+!.env.example
+*.log
+.wrangler/
+.dev.vars
 src/catalog-index.json
 src/ref-anilist.json
 src/ref-tvmaze.json
 src/meta-state.json
 src/meta-tmdb-state.json
 src/meta-tmdb.json
+.deno-upload/

@@ -1,13 +1,17 @@
 {
-  "name": "stardima-addon",
-  "version": "1.0.0",
-  "description": "Stremio/Nuvio addon for Stardima (ستارديما) — Arabic dubbed/subbed cartoons & anime catalog + streaming",
-  "main": "index.js",
+  "name": "krtoon-zaman-addon",
+  "version": "3.8.0",
+  "private": true,
+  "description": "Arabic cartoons and anime catalog/stream addon for Stremio and Nuvio",
+  "main": "serve-worker.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node serve-worker.js",
+    "build": "node src/build-worker.js",
+    "check": "node --check worker-addon.js && node --check serve-worker.js",
+    "smoke": "node tools/container-smoke.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "license": "MIT"
 }

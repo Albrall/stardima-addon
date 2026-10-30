@@ -8,9 +8,11 @@
 set -e
 cd "$(dirname "$0")/../.."
 node src/build-worker.js
-rm -rf .deno-upload
-mkdir -p .deno-upload
-cp worker-addon.js .deno-upload/
-sed "s#'../worker-addon.js'#'./worker-addon.js'#" deploy/deno/main.js > .deno-upload/main.js
-cd .deno-upload
+# Do not use a dot-directory here: the current Deno Deploy CLI treats hidden
+# upload roots as ignored and creates a revision with no main.js.
+rm -rf deno-upload
+mkdir -p deno-upload
+cp worker-addon.js deno-upload/
+sed "s#'../worker-addon.js'#'./worker-addon.js'#" deploy/deno/main.js > deno-upload/main.js
+cd deno-upload
 exec deno deploy --org albrall --app krtoon-zaman --prod --token "$DENO_DEPLOY_TOKEN" -y

@@ -6,7 +6,7 @@
 // Returns a list of playable streams (one per working server).
 
 const stardima = require('./stardima');
-const { resolveHost, UA } = require('./hosts');
+const { resolveHost, unwrapEmbed, UA } = require('./hosts');
 
 function decodeEntities(s) {
   return (s || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/\\\//g, '/').trim();
@@ -26,20 +26,24 @@ function extractInertiaProps(html) {
   }
 }
 
-// Given a hyperwatching watch URL, return [{name, host embed url}] for each server.
+// Given a hyperwatching watch URL, return { servers: [{name, host embed url}], pending }.
+// A server the source is still "processing" has no link at all — every id 404s — so it
+// is reported as pending instead of costing a request that can only fail.
 async function getHyperwatchingServers(watchUrl) {
   let html;
   try {
     const res = await fetch(watchUrl, { headers: { 'User-Agent': UA, 'Referer': stardima.BASE + '/', 'Accept-Language': 'en-US,en;q=0.9' } });
     html = await res.text();
-  } catch (e) { return []; }
+  } catch (e) { return { servers: [], pending: 0 }; }
   const props = extractInertiaProps(html);
   const video = props && props.props && props.props.video;
-  if (!video || !video.hashid || !Array.isArray(video.servers)) return [];
+  if (!video || !video.hashid || !Array.isArray(video.servers)) return { servers: [], pending: 0 };
   const hashid = video.hashid;
   const base = new URL(watchUrl).origin; // https://v2.hyperwatching.com
   const servers = [];
+  let pending = 0;
   for (const s of video.servers) {
+    if (s.status && s.status !== 'completed') { pending++; continue; }
     // Resolve the actual host embed url for this server
     try {
       const res = await fetch(`${base}/embed/${hashid}/server/${s.id}/url`, {
@@ -50,7 +54,7 @@ async function getHyperwatchingServers(watchUrl) {
       if (data && data.watch_url) servers.push({ name: s.name || ('server ' + s.server_id), embedUrl: decodeEntities(data.watch_url), is_vip: !!s.is_vip });
     } catch (e) { /* skip this server */ }
   }
-  return servers;
+  return { servers, pending };
 }
 
 // Resolve all playable streams for a Stardima episode id (eager: resolves m3u8 now).
@@ -63,7 +67,7 @@ async function resolveEpisode(episodeId) {
   }
   if (!link.watch_url) return { blocked: false, streams: [] };
 
-  const servers = await getHyperwatchingServers(link.watch_url);
+  const { servers } = await getHyperwatchingServers(link.watch_url);
   const streams = [];
   for (const srv of servers) {
     try {
@@ -83,8 +87,8 @@ async function getServers(episodeId) {
   const link = await stardima.getEpisodeLink(episodeId);
   if (!link.can_watch) return { blocked: true, reason: link.reason, servers: [] };
   if (!link.watch_url) return { blocked: false, servers: [] };
-  const servers = await getHyperwatchingServers(link.watch_url);
-  return { blocked: false, servers, title: link.title, series: link.series };
+  const { servers, pending } = await getHyperwatchingServers(link.watch_url);
+  return { blocked: false, servers, pending, watch_url: link.watch_url, title: link.title, series: link.series };
 }
 
 
@@ -95,15 +99,17 @@ async function getMovieServers(slug) {
     || html.match(/<iframe[^>]+src="(https?:\/\/[^"]+\/watch\/[A-Za-z0-9_-]+)"/i);
   const watchUrl = m ? (m[1] || m[0]) : null;
   if (!watchUrl) return { blocked: false, servers: [], watch_url: null };
-  const servers = await getHyperwatchingServers(watchUrl);
-  return { blocked: false, servers, watch_url: watchUrl };
+  const { servers, pending } = await getHyperwatchingServers(watchUrl);
+  return { blocked: false, servers, pending, watch_url: watchUrl };
 }
 
-// Known-good host order: workers can reach uqload/mixdrop reliably, while
-// goodstream/savefiles/streamhg 404 and lulustream 403s from edge IPs.
+// Host order, measured on Deno Deploy after the move off Cloudflare (2026-10-12).
+// Uqload is first: it answers 12/12 once the strema.top wrapper is unwrapped, and it
+// is the host our per-work quality figures were measured on, so the badge is honest.
+// Mixdrop is a close second (direct mp4). The rest have never answered for us.
 const HOST_PRIORITY = [
-  [/uqload/i, 0], [/mixdrop/i, 1], [/vidlo|videobin|vidbom|doodstream|streamsb|upstream/i, 2],
-  [/lulustream/i, 3], [/strema|goodstream/i, 4], [/savefiles/i, 5], [/hgcloud|streamhg/i, 6],
+  [/uqload|strema\.top/i, 0], [/mixdrop/i, 1], [/vidlo|videobin|vidbom|doodstream|streamsb|upstream/i, 2],
+  [/lulustream|luluvdo/i, 3], [/savefiles/i, 4], [/hgcloud|streamhg/i, 5], [/goodstream/i, 6],
 ];
 function hostRank(srv) {
   const s = (srv && ((srv.name || '') + ' ' + (srv.embedUrl || ''))) || '';
@@ -118,7 +124,8 @@ const HEALTH_OK_TTL = 30 * 60 * 1000;
 const HEALTH_FAIL_TTL = 2 * 60 * 1000; // short: these hosts come and go by the minute
 
 function hostKeyOf(srv) {
-  try { return new URL(srv.embedUrl).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
+  // health belongs to the host that serves the file, not to the wrapper around it
+  try { return new URL(unwrapEmbed(srv.embedUrl)).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
 }
 function healthPenalty(srv) {
   const h = _health.get(hostKeyOf(srv));
@@ -136,10 +143,19 @@ async function fetchWith(url, opts, ms) {
   finally { clearTimeout(to); }
 }
 async function verifyServer(srv, ms = 9000) {
-  const r = await resolveHost(srv.embedUrl);
-  if (!r || !r.url) return false;
-  const res = await fetchWith(r.url, { headers: { 'User-Agent': UA, Referer: r.referer, Accept: '*/*', Range: 'bytes=0-1000' } }, ms);
-  return !!(res && (res.ok || res.status === 206));
+  // Hosts refuse in bursts: Mixdrop answers seven requests out of ten, so one unlucky
+  // probe must not hide a working server for the next two minutes. Try twice.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 600));
+    let r = null;
+    try { r = await resolveHost(srv.embedUrl); } catch (e) { r = null; }
+    if (!r || !r.url) continue;
+    try {
+      const res = await fetchWith(r.url, { headers: { 'User-Agent': UA, Referer: r.referer, Accept: '*/*', Range: 'bytes=0-1000' } }, ms);
+      if (res && (res.ok || res.status === 206)) return r;
+    } catch (e) { /* try once more */ }
+  }
+  return false;
 }
 function probeServers(servers, slots) {
   const jobs = [];
@@ -148,8 +164,11 @@ function probeServers(servers, slots) {
     if (!key || !/^https?:/i.test(srv.embedUrl || '')) continue;
     jobs.push(
       verifyServer(srv)
-        .then((ok) => { _health.set(key, { ok: !!ok, t: Date.now() }); })
-        .catch(() => { _health.set(key, { ok: false, t: Date.now() }); })
+        .then((resolved) => {
+          if (resolved && resolved.url) srv.resolved = resolved;
+          _health.set(key, { ok: !!resolved, t: Date.now(), resolved: resolved || null });
+        })
+        .catch(() => { _health.set(key, { ok: false, t: Date.now(), resolved: null }); })
     );
   }
   return jobs;
@@ -191,5 +210,10 @@ function serverHealth(srv) {
   if (!h.ok) return 'bad';
   return 'ok';
 }
+function serverResolved(srv) {
+  if (srv && srv.resolved && srv.resolved.url) return srv.resolved;
+  const h = _health.get(hostKeyOf(srv));
+  return h && h.ok && h.resolved && h.resolved.url ? h.resolved : null;
+}
 
-module.exports = { resolveEpisode, getServers, getMovieServers, orderServers, hostRank, getHyperwatchingServers, extractInertiaProps, serverHealth };
+module.exports = { resolveEpisode, getServers, getMovieServers, orderServers, hostRank, getHyperwatchingServers, extractInertiaProps, serverHealth, serverResolved };

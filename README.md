@@ -1,9 +1,12 @@
-# Stardima Add-on (Stremio / Nuvio) — v3.0.0
+# كرتون زمان — Stremio / Nuvio Add-on — v3.8.0
 
-Add-on exposes the full Stardima library (Arabic-dubbed/subbed anime & cartoons) to
-Stremio and Nuvio: browse, search, episode lists and playable streams.
+Arabic-first catalog and playback addon for dubbed/subtitled cartoons and anime.
+It provides browsing, search, episode lists, health-checked streams, and daily
+semantic recommendations inferred from titles, synopses, dates, and curated tags.
 
-**Live Worker:** `https://stardima-proxy.ingots-18joist.workers.dev/manifest.json`
+**Live Worker:** `https://krtoonzaman.albranmaze7.workers.dev/manifest.json`
+
+**ElfHosted/container deployment:** see [`ELFHOSTED.md`](ELFHOSTED.md).
 
 ## What it does
 
@@ -13,7 +16,7 @@ Stremio and Nuvio: browse, search, episode lists and playable streams.
 | `catalog/{type}/{id}` | Alphabetical (Arabic collation) slice of an embedded index of the whole library — 2257 series + 1597 movies, 450 items per catalog |
 | `catalog/{type}/{id}/search=X` | Live site search, **all result pages**, single-episode hits removed, sorted A→Y |
 | `meta/{type}/{id}` | Series: seasons/episodes (e.g. المحقق كونان = 698 episodes). Movie: poster/description |
-| `stream/{type}/{id}` | One stream per upstream server, **health-probed and ordered** so a working host comes first (Uqload/Mixdrop reachable from the edge; Goodstream/Savefiles/Streamhg 404, Lulustream 403) |
+| `stream/{type}/{id}` | One stream per upstream server, **health-probed and ordered** so a working host comes first (Uqload and Mixdrop play; Streamhg/Savefiles/Lulustream are listed but never answer) |
 | `proxy/embed?u=` | Resolves the host embed **fresh at playback time** (upstream m3u8 tokens are short-lived), rewrites playlists so every URI routes back through the Worker |
 | `catalog/{type}/{id}/genre=X` | Filter by one of the site's 36 categories (genres). Arabic letters are normalised, so `أنمي` also matches the site's `انمي`. Composable with `search` and `skip` |
 | `catalog/{type}/stardima-new[-movies]` | "أحدث المسلسلات / أحدث الأفلام" shelves — newest first (site order, merged live) |
@@ -135,11 +138,15 @@ curl -X PUT "$CF_API/accounts/$CF_ACCOUNT/workers/scripts/stardima-proxy" \
   `lib/unpacker.js`.
 - ~82% of posters are TMDB URLs; the rest are site-relative and resolve under
   `{base}/storage/`. Both forms are absolutised before they reach the client.
-- **Only uqload is playable from a Cloudflare Worker** (measured 2026-09). Mixdrop and
-  Lulustream hand out IP-bound tokens and 403 their CDN from Cloudflare *and* from
-  Render; savefiles serves a JS challenge; streamhg/goodstream hide the stream behind
-  obfuscated JWPlayer bootstrap code. `uqload` therefore leads the stream list, and the
-  others are labelled "قد لا يعمل من السحابة" so a failed server is not a mystery.
+- **Host health, measured 2026-10-12 after the move to Deno Deploy.** Uqload and Mixdrop
+  both play; the other three the source advertises do not, and each for a different
+  reason: Streamhg's player is an obfuscated bootstrap (every guessed API path answers
+  522/404), Savefiles answers "file is no longer available" for every sample, and
+  Lulustream's CDN (`tnmr.org`) 403s the segments. They are still listed, unmarked.
+- **Uqload hides behind a wrapper.** hyperwatching hands out
+  `strema.top/embed2/?id=https://uqload.vc/embed-….html`, and the wrapper's own chain
+  (form POST + redirect) is what fails; `unwrapEmbed()` in `lib/hosts.js` reaches the
+  player behind it, which answers with HLS up to 1080p.
 - A Render relay was built and tested to work around that; it resolved and streamed
   uqload fine but could not resolve the blocked hosts either, so it was removed —
   no benefit, only cold starts.

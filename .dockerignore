@@ -1,2 +1,14 @@
 .git
+.github
 node_modules
+reports
+src
+tools
+ci
+deploy
+*.csv
+*.md
+cloudflare-worker.js
+ids-map.js
+index.js
+wrangler.toml

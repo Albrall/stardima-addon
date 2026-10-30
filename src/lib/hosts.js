@@ -103,9 +103,35 @@ function scan(html, pageUrl) {
   return inner ? { inner: inner[0], html, pageUrl } : null;
 }
 
+// Several servers are only wrappers: the real player sits in a query parameter.
+// hyperwatching's "Uqload" entry, for instance, is
+//   https://strema.top/embed2/?id=https%3A%2F%2Fuqload.vc%2Fembed-xxxx.html
+// and the wrapper's own chain (a form POST plus a redirect) is exactly what used to
+// fail, while the player behind it answers straight away. So unwrap first.
+const WRAPPER_PARAMS = ['id', 'url', 'u', 'file', 'v', 'link', 'link_id'];
+function unwrapEmbed(u) {
+  try {
+    const url = new URL(u);
+    for (const k of WRAPPER_PARAMS) {
+      const v = url.searchParams.get(k);
+      if (v && /^https?:\/\//i.test(v)) return v;
+    }
+  } catch (e) { /* not a parseable URL */ }
+  return u;
+}
+
 // Resolve a host embed URL to a playable stream.
 // Returns { url, type: 'hls'|'mp4', referer } or null.
 async function resolveHost(embedUrl, depth = 0) {
+  if (!embedUrl || depth > 2) return null;
+  const inner = depth === 0 ? unwrapEmbed(embedUrl) : embedUrl;
+  const r = await resolveHostInner(inner, depth);
+  if (r) return r;
+  // a wrapper that gave us a dead inner link may still work the long way round
+  return inner !== embedUrl ? resolveHostInner(embedUrl, depth) : null;
+}
+
+async function resolveHostInner(embedUrl, depth) {
   if (!embedUrl || depth > 2) return null;
   let html, effective = embedUrl;
   try {
@@ -141,4 +167,4 @@ async function resolveHost(embedUrl, depth = 0) {
   return null;
 }
 
-module.exports = { resolveHost, extractCandidates, normalizeUrl, UA };
+module.exports = { resolveHost, unwrapEmbed, extractCandidates, normalizeUrl, UA };

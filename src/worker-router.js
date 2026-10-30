@@ -6,17 +6,19 @@ const {
   BASE, getJson, videoToItem, getSeriesMeta, getMovieMeta, getEpisodeLink,
   searchCatalog, compactPoster, decodePoster, byTitleAr, normTitle,
 } = require('./lib/stardima');
-const { getServers, getMovieServers, orderServers, serverHealth } = require('./lib/resolver');
-const { resolveHost, UA } = require('./lib/hosts');
+const { getServers, getMovieServers, orderServers, serverHealth, serverResolved } = require('./lib/resolver');
+const { resolveHost, unwrapEmbed, UA } = require('./lib/hosts');
 
 const NAME = 'كرتون زمان';
-// Measured 2026-09: only uqload is playable from a Cloudflare Worker. Mixdrop and
-// Lulustream return IP-bound tokens and 403 the CDN from Cloudflare *and* from
-// Render/other datacenters (verified), savefiles serves a JS challenge, and
-// streamhg/goodstream hide the stream behind obfuscated JWPlayer bootstrap code.
-// So: uqload first, the rest kept as user-visible options that may work later.
-const DEAD_FROM_EDGE = /mixdrop|mxdrop|lulustream|savefiles|hgcloud|streamhg|strema|goodstream/i;
-const VERSION = '3.1.0';
+// Measured again after the move off Cloudflare (2026-10-12), on Deno Deploy:
+//   Mixdrop  ✓ mp4, answers from this host
+//   Uqload   ✓ HLS — reachable only after unwrapping the strema.top wrapper
+//   Streamhg ✗ player is an obfuscated bootstrap; every guessed API path is 522/404
+//   Savefiles ✗ "file is no longer available" for every sample
+//   Lulustream ✗ the CDN behind it (tnmr.org) 403s the segments
+// Anything still listed here gets a warning label instead of being hidden.
+const DEAD_FROM_EDGE = /lulustream|savefiles|hgcloud|streamhg/i;
+const VERSION = '3.8.0';
 const ID = 'community.stardima';
 const CHUNK_SIZE = 450; // items per chunked catalog
 // 'single'  = two long catalogs (all series, all movies) — one list, nothing to navigate
@@ -31,6 +33,75 @@ function catalogMode(url) {
 
 // Replaced at build time by build-worker.js with catalog-index.min.json
 const INDEX = /*__INDEX__*/{};
+
+// Works we could tie to an IMDb id (src/build-ids.js). A linked work is published
+// under its IMDb id, because that is the id Stremio clients use to put the streams of
+// every addon that knows the title on one page. Everything else keeps our own ids.
+const IDS = {};
+// The external table is a compact "slug=base36IMDbNumber" string; unpack it once.
+for (const row of String(/*__IDS__*/'').split(',')) {
+  const at = row.lastIndexOf('=');
+  if (at > 0) {
+    const packed = row.slice(at + 1);
+    const width = Number(packed[0]) || 7; // preserves leading zeroes in old IMDb ids
+    IDS[row.slice(0, at)] = 'tt' + String(parseInt(packed.slice(1), 36)).padStart(width, '0');
+  }
+}
+// Store only forward tables in the bundle; reverse them once at startup.
+const IDS_REV = {};
+for (const k in IDS) IDS_REV[IDS[k]] = k;
+// TMDB table entries are packed as localKey=t|m + base36 id.
+const TMDB = {}, TMDB_REV = {};
+for (const row of String(/*__TMDB__*/'').split(',')) {
+  const at = row.lastIndexOf('=');
+  if (at <= 0) continue;
+  const key = row.slice(0, at), packed = row.slice(at + 1);
+  const media = packed[0] === 'm' ? 'movie' : 'tv';
+  const id = String(parseInt(packed.slice(1), 36));
+  TMDB[key] = { media, id };
+  TMDB_REV[media + '/' + id] = key;
+}
+function tmdbPublicId(key) { const x = TMDB[key]; return x ? 'tmdb:' + x.id : null; }
+function publicId(slug) { return IDS[slug] || tmdbPublicId(slug) || 'stardima:' + slug; }
+function publicKey(key) { return IDS[key] || tmdbPublicId(key) || key; }       // jcartoon keys
+// IMDb/TMDB id (with optional :season:episode tail) -> our key, or null.
+function externalKeyArg(idArg, type) {
+  const imdb = /^(tt\d+)(?::(\d+):(\d+))?$/.exec(idArg || '');
+  if (imdb) {
+    const k = IDS_REV[imdb[1]];
+    return k ? k + (imdb[2] ? ':' + imdb[2] + ':' + imdb[3] : '') : null;
+  }
+  const tmdb = /^tmdb:(\d+)(?::(\d+):(\d+))?$/.exec(idArg || '');
+  if (tmdb) {
+    const media = type === 'movie' ? 'movie' : 'tv';
+    const k = TMDB_REV[media + '/' + tmdb[1]];
+    return k ? k + (tmdb[2] ? ':' + tmdb[2] + ':' + tmdb[3] : '') : null;
+  }
+  return idArg;
+}
+// season/episode -> the upload that actually holds that episode, the same way the
+// episode list is built, so tapping episode 5 of 12 always lands on episode 5.
+async function resolveEpisodeId(slug, season, episode) {
+  const fm = familyOf(slug);
+  const spine = fm ? fm.primary : slug;
+  const epMap = fm ? ((INDEX.families.epMap || {})[fm.primary] || {}) : {};
+  let meta = null;
+  try { meta = await getSeriesMeta(spine); } catch (e) { return null; }
+  const key = season + ':' + episode;
+  const own = new Map();
+  for (const v of (meta && meta.videos) || []) own.set((v.season || 1) + ':' + (v.episode || 1), v);
+  const v = own.get(key);
+  if (v) return { slug: spine, epId: v.episodeId || String(v.id || '').split(':').pop() };
+  const list = epMap[key] || [];
+  const pick = list.find((x) => x[0] !== spine) || list[0];
+  return pick ? { slug: pick[0], epId: pick[1] } : null;
+}
+async function firstEpisodeId(slug) {
+  let meta = null;
+  try { meta = await getSeriesMeta(slug); } catch (e) { return null; }
+  const v = ((meta && meta.videos) || [])[0];
+  return v ? { slug, epId: v.episodeId || String(v.id || '').split(':').pop() } : null;
+}
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -55,6 +126,7 @@ function keyOf(id) { return /^stardima-m/.test(id || '') ? 'movies' : 'series'; 
 function epOfKey(key) { return key === 'movies' ? 'aflam' : 'mosalsalat'; }
 function chunkOf(id) { const m = /(\d+)$/.exec(id || ''); return m ? parseInt(m[1], 10) : 1; }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function arabicNum(n) { return String(n).replace(/\d/g, (d) => '٠١٢٣٤٥٦٧٨٩'[d]); }
 
 // Worker-safe base64url (no Buffer in Workers)
 function b64url(str) {
@@ -205,6 +277,63 @@ function genreBreakdown(slug) {
   if (ourIdx) for (const n of String(ourIdx).split(',')) add(ourGenreLabels()[+n]);
   const siteIdx = (((INDEX.genres || {}).items) || {})[slug];
   if (siteIdx) for (const n of String(siteIdx).split(',')) add((siteGenreLabels()[+n] || [])[1]);
+  return out;
+}
+
+// Daily semantic recommendations. The tags behind these themes were inferred from
+// titles, synopses, dates and curated collections by our trained genre classifier;
+// ratings and resolution are deliberately not the deciding signal. A Riyadh-date
+// seed makes the shelf change once a day without a database or a paid AI request.
+const DAILY_THEMES = [
+  { name: 'مغامرات وعوالم خيالية', tags: ['مغامرة', 'فانتازيا'] },
+  { name: 'ألغاز وتحقيقات', tags: ['غموض وتحقيق', 'دراما'] },
+  { name: 'فضاء وتقنية وروبوتات', tags: ['فضاء', 'خيال علمي', 'روبوتات'] },
+  { name: 'ضحك ومغامرات خفيفة', tags: ['كوميدي', 'مغامرة'] },
+  { name: 'رياضة وتحديات', tags: ['رياضة', 'دراما'] },
+  { name: 'مدرسة وصداقة', tags: ['مدرسي', 'كوميدي'] },
+  { name: 'حيوانات وقصص عائلية', tags: ['حيوانات', 'مغامرة'] },
+  { name: 'أبطال ومعارك', tags: ['أكشن', 'مغامرة'] },
+  { name: 'سيارات وسباقات', tags: ['سيارات', 'أكشن'] },
+  { name: 'قراصنة ورحلات بحرية', tags: ['قراصنة', 'مغامرة'] },
+  { name: 'نينجا وساموراي', tags: ['نينجا وساموراي', 'أكشن'] },
+  { name: 'حكايات تاريخية', tags: ['تاريخي', 'دراما'] },
+  { name: 'سحر وفانتازيا', tags: ['بنات السحر', 'فانتازيا'] },
+  { name: 'كلاسيكيات تستحق العودة', tags: ['كلاسيكي (قبل 2000)', 'مغامرة'] },
+];
+function riyadhDay() {
+  try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
+  catch (e) { return new Date().toISOString().slice(0, 10); }
+}
+function stableHash(s) {
+  let h = 2166136261;
+  for (let i = 0; i < String(s).length; i++) { h ^= String(s).charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function dailyTheme() {
+  const day = riyadhDay();
+  return { day, theme: DAILY_THEMES[stableHash(day) % DAILY_THEMES.length] };
+}
+function dailyRecommendationItems(key, limit = 20) {
+  const { day, theme } = dailyTheme();
+  const rows = [];
+  for (const it of (((INDEX[key] || {}).items) || [])) {
+    if (isAlias(it[0])) continue;
+    const ps = primarySlug(it[0]);
+    const tags = genreBreakdown(ps);
+    const semantic = theme.tags.reduce((n, t) => n + (tags.indexOf(t) >= 0 ? 1 : 0), 0);
+    if (!semantic) continue;
+    const primary = tags.indexOf(theme.tags[0]) >= 0 ? 1 : 0;
+    // Semantic fit wins. The hash only varies equally fitting works from day to day.
+    rows.push({ it, semantic, primary, shuffle: stableHash(day + '|' + key + '|' + ps) });
+  }
+  rows.sort((a, b) => b.semantic - a.semantic || b.primary - a.primary || a.shuffle - b.shuffle);
+  const out = [], seenTitles = new Set();
+  for (const row of rows) {
+    const title = normTitle(row.it[1]);
+    if (!title || seenTitles.has(title)) continue;
+    seenTitles.add(title); out.push(row.it);
+    if (out.length >= limit) break;
+  }
   return out;
 }
 function genreMatches(slug, wanted) {
@@ -455,14 +584,20 @@ function jcCard(x, type) {
   const key = (type === 'series' ? 'jcseries-' : 'jcartoon-') + x.id;
   const r = rOf(key);
   return {
-    id: key,
+    id: publicKey(key),
     type, name: x.title, poster: x.poster || artOf(r),
     releaseInfo: (r && r.vote ? '1080p · ★' + r.vote : '1080p'),
     description: x.desc || undefined,
   };
 }
 
-function jcSeries() { return (INDEX.jcartoon && INDEX.jcartoon.series) || []; }
+// The series CDN (vod.spacetoongo.com) currently returns HTTP 403 for every
+// tested rendition, both directly and through the Worker. Keep those entries
+// out of catalog/search and do not inject them into Stardima titles until the
+// upstream starts serving bytes again. JCartoon movies use a different CDN and
+// remain enabled because playlist + segment probes still pass.
+const JC_SERIES_ENABLED = false;
+function jcSeries() { return JC_SERIES_ENABLED ? ((INDEX.jcartoon && INDEX.jcartoon.series) || []) : []; }
 function jcMovies() { return (INDEX.jcartoon && INDEX.jcartoon.movies) || []; }
 function jcSeriesOf(id) { return jcSeries().find((x) => x.id === id) || null; }
 function jcMovieOf(id) { return jcMovies().find((x) => x.id === id) || null; }
@@ -505,15 +640,13 @@ function jcPickEpisode(series, tail) {
   return eps[0];
 }
 function jcMapMovie(slug) { const m = INDEX.jcartoon && INDEX.jcartoon.map; return m ? m[slug] : null; }
-function jcMapSeries(slug) { const m = INDEX.jcartoon && INDEX.jcartoon.smap; return m ? m[slug] : null; }
+function jcMapSeries(slug) {
+  if (!JC_SERIES_ENABLED) return null;
+  const m = INDEX.jcartoon && INDEX.jcartoon.smap;
+  return m ? m[slug] : null;
+}
 function jcHdr() { return { 'User-Agent': UA, Accept: 'application/json', Referer: 'https://jcartoon.top/' }; }
-async function jcUrlForEpisode(epId) {
-  let r;
-  try { r = await fetchT('https://jcartoon.top/api/episode/' + epId + '/download-manifest', { headers: jcHdr() }, 12000); }
-  catch (e) { return null; }
-  if (!r.ok) return null;
-  let j; try { j = await r.json(); } catch (e) { return null; }
-  const tok = j && j.qualities && j.qualities[0] && j.qualities[0].playlistToken;
+function jcToken(tok) {
   if (!tok) return null;
   try {
     const bin = atob(tok.replace(/-/g, '+').replace(/_/g, '/'));
@@ -521,6 +654,32 @@ async function jcUrlForEpisode(epId) {
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return new TextDecoder().decode(bytes);
   } catch (e) { return null; }
+}
+// Every episode carries several renditions (1080p / 720p / 480p / 360p) but not every
+// work has the top one — asking for a rendition that does not exist is what used to
+// show an episode as "١٠٨٠p" when it was really ٧٢٠p. Take the best one that answers.
+async function jcUrlForEpisode(epId) {
+  let r;
+  try { r = await fetchT('https://jcartoon.top/api/episode/' + epId + '/download-manifest', { headers: jcHdr() }, 12000); }
+  catch (e) { return null; }
+  if (!r.ok) return null;
+  let j; try { j = await r.json(); } catch (e) { return null; }
+  const cands = ((j && j.qualities) || [])
+    .map((q) => ({
+      h: Number((/(\d+)\s*x\s*(\d+)/i.exec(q.resolution || '') || [])[2] || 0),
+      url: jcToken(q.playlistToken),
+    }))
+    .filter((x) => x.url)
+    .sort((a, b) => b.h - a.h);
+  if (!cands.length) return null;
+  // the top rendition is the one you want; if that file is gone, step down to the next
+  for (const c of cands.slice(0, 3)) {
+    try {
+      const probe = await fetchT(c.url, { headers: { 'User-Agent': UA, Accept: '*/*', Range: 'bytes=0-256', Referer: 'https://jcartoon.top/' } }, 8000);
+      if (probe.ok || probe.status === 206) return c;
+    } catch (e) { /* try the next rendition */ }
+  }
+  return cands[0];
 }
 async function jcUrlForMovie(id) {
   let r;
@@ -531,9 +690,12 @@ async function jcUrlForMovie(id) {
   return (j && j.playUrl) || null;
 }
 function jcStreams(fresh, origin, label, group) {
+  const u = (fresh && fresh.url) || fresh;              // movies hand back a plain URL
+  const h = (fresh && fresh.h) || 0;
+  const q = h ? arabicNum(h) + 'p' : '١٠٨٠p';
   return [
-    { name: '١٠٨٠p', title: label + ' — مباشر', url: fresh, behaviorHints: { notWebReady: true, bingeGroup: group } },
-    { name: '١٠٨٠p · بديل', title: label + ' — عبر السحابة (لو تعطّل المباشر)', url: `${origin}/proxy?u=${b64url(fresh)}`, behaviorHints: { notWebReady: true, bingeGroup: group + '-p' } },
+    { name: q, title: label + ' — مباشر', url: u, behaviorHints: { notWebReady: true, bingeGroup: group } },
+    { name: q + ' · بديل', title: label + ' — عبر السحابة (لو تعطّل المباشر)', url: `${origin}/proxy?u=${b64url(u)}`, behaviorHints: { notWebReady: true, bingeGroup: group + '-p' } },
   ];
 }
 
@@ -658,8 +820,11 @@ async function buildManifest(url) {
   if (mode === 'single') {
     const genreExtra = genreOptions().length
       ? [{ name: 'genre', options: genreOptions(), isRequired: false }] : [];
+    const today = dailyTheme().theme.name;
+    series.push({ id: 'stardima-daily', type: 'series', name: `${NAME}: اقتراحات اليوم — ${today}` });
     series.push({ id: 'stardima', type: 'series', name: `${NAME}: كل المسلسلات (أ-ي)`, extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
     series.push({ id: 'stardima-new', type: 'series', name: `${NAME}: أحدث المسلسلات`, extra: searchExtra });
+    movies.push({ id: 'stardima-daily-movies', type: 'movie', name: `${NAME}: أفلام مقترحة اليوم — ${today}` });
     movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: كل الأفلام (أ-ي)`, extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
     movies.push({ id: 'stardima-new-movies', type: 'movie', name: `${NAME}: أحدث الأفلام`, extra: searchExtra });
     // مصدر ثانٍ: jcartoon.top — كل عنصر فيه فيديو واحد بجودة FULL HD
@@ -698,7 +863,7 @@ async function buildManifest(url) {
     id: ID, version: VERSION, name: NAME,
     description: 'مكتبة كرتون كاملة مرتبة أبجديًا — ' + sN + ' مسلسل و' + mN + ' فيلم، مع الحلقات وبث مباشر',
     resources: ['catalog', 'meta', 'stream'], types: ['series', 'movie'],
-    idPrefixes: ['stardima:', 'jcseries-', 'jcartoon-', 'jcartoon:'], catalogs: [...series, ...movies],
+    idPrefixes: ['tt', 'tmdb:', 'stardima:', 'jcseries-', 'jcartoon-', 'jcartoon:'], catalogs: [...series, ...movies],
     behaviorHints: { configurableFor: false, configurationRequired: false },
   };
 }
@@ -961,7 +1126,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       const seenSearch = new Set();
       const metas = [];
       for (const x of merged) {
-        const id = x.jc ? x.id : 'stardima:' + primarySlug(x.slug || x.id); // duplicate uploads → one result
+        const id = x.jc ? publicKey(x.id) : publicId(primarySlug(x.slug || x.id)); // duplicate uploads → one result
         if (seenSearch.has(id)) continue;
         seenSearch.add(id);
         metas.push({
@@ -980,11 +1145,18 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const toMeta = (it) => {
       const ps = primarySlug(it[0]);
       return {
-        id: 'stardima:' + ps, type, name: it[1],
+        id: publicId(ps), type, name: it[1],
         poster: decodePoster(it[2]) || undefined,
         releaseInfo: relInfo(it[3], qOf(ps) || qOf(it[0]), rOf('stardima:' + ps) || rOf('stardima:' + it[0])),
       };
     };
+    // AI-assisted daily shelf: subject and story tags drive the choice; date-seeded
+    // rotation gives a fresh, coherent set every day in Riyadh time.
+    if (id === 'stardima-daily' || id === 'stardima-daily-movies') {
+      const dailyKey = id === 'stardima-daily' ? 'series' : 'movies';
+      return json({ metas: dailyRecommendationItems(dailyKey, 20).map(toMeta) });
+    }
+
     // top-rated shelf: needs a real vote count, otherwise a 10.0 from three people wins
     if (id === 'stardima-top' || id === 'stardima-top-movies') {
       const key = id === 'stardima-top' ? 'series' : 'movies';
@@ -1045,6 +1217,11 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const tuned = applyQualitySort(metas, extras, type);
     if (tuned !== metas) { metas.length = 0; metas.push(...tuned); } // same array when nothing was asked for
     if (extras.skip) { const sk = parseInt(extras.skip, 10) || 0; if (sk > 0) metas.splice(0, sk); }
+    // two works we hold separately can carry the same IMDb id: keep one row per id
+    const seenIds = new Set();
+    for (let i = metas.length - 1; i >= 0; i--) {
+      if (seenIds.has(metas[i].id)) metas.splice(i, 1); else seenIds.add(metas[i].id);
+    }
     const total = metas.length;
     // Older installs (and ?mode=chunked) still ask for stardima-s3 / stardima-m2
     // style ids — keep serving those as 450-item slices so nothing breaks.
@@ -1066,25 +1243,29 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     return json({ metas: metas.slice(start, end) });
   }
 
-  // /meta/{type}/{id}.json  (id = stardima:{slug})
+  // /meta/{type}/{id}.json  (id = tt<imdb> when we know it, otherwise stardima:{slug})
   if (path.startsWith('/meta/')) {
     const m = /^\/meta\/([^/]+)\/([^/]+)$/.exec(path);
     if (!m) return notFound();
     const type = m[1];
-    const jcm = jcResolve(decodeURIComponent(m[2]));
+    const requestedMetaId = decodeURIComponent(m[2]);
+    // A linked work can be asked for by IMDb or TMDB — translate it to our own key.
+    const metaIdArg = externalKeyArg(requestedMetaId, type);
+    if (metaIdArg == null) return notFound();
+    const jcm = jcResolve(metaIdArg);
     if (jcm) {
       if (jcm.kind === 'series') {
         const it = jcSeriesOf(jcm.id);
         if (!it) return notFound();
         const videos = (it.episodes || []).map((e, i) => ({
           // standard shape: <metaId>:<season>:<episode> — Nuvio parses these numbers
-          id: 'jcseries-' + it.id + ':' + (e[2] || 1) + ':' + (e[1] || i + 1),
+          id: publicKey('jcseries-' + it.id) + ':' + (e[2] || 1) + ':' + (e[1] || i + 1),
           title: 'الحلقة ' + (e[1] || i + 1),
           season: e[2] || 1, episode: e[1] || i + 1, episodeId: e[0],
         }));
         const rrS = rOf('jcseries-' + it.id);
         return json({ meta: {
-          id: 'jcseries-' + it.id, type: 'series', name: it.title,
+          id: publicKey('jcseries-' + it.id), type: 'series', name: it.title,
           poster: it.poster || artOf(rrS), background: backOf(rrS),
           description: (rrS ? (rrS.vote ? `★ ${rrS.vote}/10 من TMDB\n` : '') + (rrS.overview ? rrS.overview + '\n' : '') : '') + (it.desc || ''),
           genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean), videos,
@@ -1094,27 +1275,30 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       if (!it) return notFound();
       if (it.episodes && (type !== 'movie' || (it.episodes || []).length > 1)) {
         const videos = (it.episodes || []).map((e, i) => ({
-          id: 'jcseries-' + it.id + ':' + (e[2] || 1) + ':' + (e[1] || i + 1),
+          id: publicKey('jcseries-' + it.id) + ':' + (e[2] || 1) + ':' + (e[1] || i + 1),
           title: 'الحلقة ' + (e[1] || i + 1),
           season: e[2] || 1, episode: e[1] || i + 1, episodeId: e[0],
         }));
-        return json({ meta: { id: 'jcseries-' + it.id, type: 'series', name: it.title, poster: it.poster || undefined, description: it.desc || undefined, genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean), videos } });
+        return json({ meta: { id: publicKey('jcseries-' + it.id), type: 'series', name: it.title, poster: it.poster || undefined, description: it.desc || undefined, genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean), videos } });
       }
       const rrM = rOf('jcartoon-' + it.id);
       return json({ meta: {
-        id: 'jcartoon-' + it.id, type: 'movie', name: it.title,
+        id: publicKey('jcartoon-' + it.id), type: 'movie', name: it.title,
         poster: it.poster || artOf(rrM), background: backOf(rrM),
         description: (rrM ? (rrM.vote ? `★ ${rrM.vote}/10 من TMDB\n` : '') + (rrM.overview ? rrM.overview + '\n' : '') : '') + (it.desc || ''),
         genres: [String(it.genre || '').replace(/^كوكب\s*/, '')].filter(Boolean),
       } });
     }
-    const slug = decodeURIComponent(m[2]).replace(/^stardima:/, '').split(':')[0];
-    const ck = 'meta:' + type + ':' + slug;
+    const slug = metaIdArg.replace(/^stardima:/, '').split(':')[0];
+    const ck = 'meta:' + type + ':' + slug + ':' + requestedMetaId;
     const hit = _cache.get(ck);
     if (hit && Date.now() - hit.t < 30 * 60 * 1000) return json(hit.v);
     const meta = type === 'series' ? await getSeriesMeta(slug) : type === 'movie' ? await getMovieMeta(slug) : null;
     if (!meta) return notFound();
-    meta.id = 'stardima:' + slug;
+    const responseMetaId = /^(?:tt\d+|tmdb:\d+)$/.test(requestedMetaId) ? requestedMetaId : publicId(slug);
+    meta.id = responseMetaId;
+    meta.imdb_id = IDS[slug] || undefined;
+    meta.moviedb_id = TMDB[slug] ? Number(TMDB[slug].id) : undefined;
     const gs = genreBreakdown(slug); if (gs.length) meta.genres = gs;
     const qh = qOf(slug);
     if (qh) meta.description = `الجودة الحقيقية: ${qh}p\n` + (meta.description || '');
@@ -1156,13 +1340,13 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       meta.videos = keys.map((k) => {
         const sN = Number(k.split(':')[0]) || 1; const eN = Number(k.split(':')[1]) || 1;
         const v = own.get(k);
-        if (v) return { ...v, id: 'stardima:' + spine + ':' + epIdOf(v) };
+        if (v) return { ...v, id: /^(?:tt\d+|tmdb:\d+)$/.test(responseMetaId) ? `${responseMetaId}:${sN}:${eN}` : 'stardima:' + spine + ':' + epIdOf(v) };
         // episode exists only in another edition → play it from there
         const list = epMap[k] || [];
         const pick = list.find((x) => x[0] !== spine) || list[0];
         if (!pick) return null;
         const title = eN > 400 ? 'حلقة إضافية' : 'الحلقة ' + eN;
-        return { id: 'stardima:' + pick[0] + ':' + pick[1], title, season: sN, episode: eN, episodeId: pick[1] };
+        return { id: /^(?:tt\d+|tmdb:\d+)$/.test(responseMetaId) ? `${responseMetaId}:${sN}:${eN}` : 'stardima:' + pick[0] + ':' + pick[1], title, season: sN, episode: eN, episodeId: pick[1] };
       }).filter(Boolean);
       out = { meta };
     }
@@ -1175,21 +1359,40 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     const m = /^\/stream\/([^/]+)\/([^/]+)$/.exec(path);
     if (!m) return notFound();
     const type = m[1];
-    const jcs = jcResolve(decodeURIComponent(m[2]));
+    // A linked work may arrive as IMDb or TMDB, with an optional season/episode tail.
+    let streamId = decodeURIComponent(m[2]);
+    const ext = /^(?:tt\d+|tmdb:\d+)(?::(\d+):(\d+))?$/.exec(streamId);
+    if (ext) {
+      const local = externalKeyArg(streamId, type);
+      if (!local) return json({ streams: [] });
+      const k = local.split(':')[0];
+      if (/^jc/.test(k)) {
+        streamId = k + (ext[1] ? ':' + ext[1] + ':' + ext[2] : '');
+      } else if (type === 'movie') {
+        streamId = 'stardima:' + k;
+      } else {
+        const hit = ext[1]
+          ? await resolveEpisodeId(k, Number(ext[1]), Number(ext[2]))
+          : await firstEpisodeId(k);
+        if (!hit || !hit.epId) return json({ streams: [] });
+        streamId = 'stardima:' + hit.slug + ':' + hit.epId;
+      }
+    }
+    const jcs = jcResolve(streamId);
     if (jcs) {
       if (jcs.kind === 'movie') {
         const it = jcMovieOf(jcs.id);
         if (it) {
           const fresh = await jcUrlForMovie(it.id);
           if (!fresh) return json({ streams: [] });
-          return json({ streams: jcStreams(fresh, url.origin, it.title + ' — ١٩٢٠×١٠٨٠', 'jcartoon') });
+          return json({ streams: jcStreams(fresh, url.origin, it.title, 'jcartoon') });
         }
         const alt = jcSeriesOf(jcs.id);            // it may be a series listed as a film
         if (!alt) return notFound();
         const ep0 = jcPickEpisode(alt, []);
         const fresh0 = ep0 ? await jcUrlForEpisode(ep0[0]) : null;
         if (!fresh0) return json({ streams: [] });
-        return json({ streams: jcStreams(fresh0, url.origin, alt.title + ' — ١٩٢٠×١٠٨٠', 'jcartoon') });
+        return json({ streams: jcStreams(fresh0, url.origin, alt.title, 'jcartoon') });
       }
       const it = jcSeriesOf(jcs.id);
       if (!it) return notFound();
@@ -1197,9 +1400,9 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       if (!ep) return json({ streams: [] });
       const fresh = await jcUrlForEpisode(ep[0]);
       if (!fresh) return json({ streams: [] });
-      return json({ streams: jcStreams(fresh, url.origin, 'الحلقة ' + (ep[1] || '') + ' بجودة ١٩٢٠×١٠٨٠', 'jcartoon') });
+      return json({ streams: jcStreams(fresh, url.origin, 'الحلقة ' + (ep[1] || ''), 'jcartoon') });
     }
-    const raw = decodeURIComponent(m[2]).replace(/^stardima:/, '');
+    const raw = streamId.replace(/^stardima:/, '');
     if (type !== 'series' && type !== 'movie') return notFound();
     const parts = raw.split(':');
     const epId = parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1]) ? parts[parts.length - 1] : null;
@@ -1219,9 +1422,24 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
 
     // Which uploads of this work exist? (dubbed / subbed / uncut …)
     const fam = familyOf(slug);
+    // Keep one canonical SxxExx coordinate for every language/upload copy. Nuvio
+    // can then match the next episode by both bingeGroup and filename.
+    let playbackSeason = 1, playbackEpisode = 1;
+    if (type === 'series') {
+      try {
+        const mm = await getSeriesMeta(slug);
+        const vv = ((mm && mm.videos) || []).find((x) => String(x.episodeId || String(x.id).split(':').pop()) === String(useEpId));
+        if (vv) { playbackSeason = Number(vv.season) || 1; playbackEpisode = Number(vv.episode) || 1; }
+      } catch (e) { /* retain safe defaults */ }
+    }
     const targets = []; // [{ memberSlug, label, epId }]
     if (fam) {
       const seasonEpisode = useEpId ? keyOfEpisode(fam.primary, slug, useEpId) : null;
+      if (seasonEpisode) {
+        const se = seasonEpisode.split(':');
+        playbackSeason = Number(se[0]) || playbackSeason;
+        playbackEpisode = Number(se[1]) || playbackEpisode;
+      }
       for (const m of fam.fam.members) {
         if (fam.fam.sec !== 'series') {
           // every movie upload is the full film — no episode map needed
@@ -1243,7 +1461,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       const movieHit = type === 'movie' ? jcMapMovie(slug) : null;
       if (movieHit) {
         const fresh = await jcUrlForMovie(movieHit.id);
-        if (fresh) jcFirst.push(...jcStreams(fresh, url.origin, 'نسخة كاملة ١٩٢٠×١٠٨٠', 'jcartoon'));
+        if (fresh) jcFirst.push(...jcStreams(fresh, url.origin, 'نسخة كاملة', 'jcartoon'));
       }
       // series: match the episode by its number in the original
       const seriesHit = type === 'series' ? jcMapSeries(slug) : null;
@@ -1271,7 +1489,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         const jcEp = (jcS && fuzzyOk && epNo != null) ? (jcS.episodes || []).find((e) => String(e[1]) === String(epNo)) : null;
         if (jcEp) {
           const fresh = await jcUrlForEpisode(jcEp[0]);
-          if (fresh) jcFirst.push(...jcStreams(fresh, url.origin, 'الحلقة ' + epNo + ' بجودة ١٩٢٠×١٠٨٠', 'jcartoon'));
+          if (fresh) jcFirst.push(...jcStreams(fresh, url.origin, 'الحلقة ' + epNo, 'jcartoon'));
         }
       }
     } catch (e) { /* jcartoon down → Stardima streams still answer */ }
@@ -1292,6 +1510,12 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           collected.push({ name: NAME, title: msg, externalUrl: BASE + '/membership' });
           continue;
         }
+        // nothing to play and nothing hidden: the source is still encoding this one,
+        // so say that instead of showing an empty list and looking broken
+        if (result && !(result.servers || []).length && result.pending) {
+          collected.push({ name: NAME, title: 'قيد المعالجة عند المصدر — ما نزلت روابطه بعد، جرّبه لاحقًا', externalUrl: result.watch_url || BASE + '/' });
+          continue;
+        }
         list = await orderServers((result && result.servers) || [], {
           maxProbe: 5,
           verifyBudget: 6000, // wait for the real answer: resolve + first bytes
@@ -1300,22 +1524,73 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         if (list.length) _cache.set(ck, { t: Date.now(), v: list });
       }
       const qh = qOf(t.memberSlug); // the measured ceiling for this copy of the work
+      const failed = [];
+      let shownHere = 0;
+      const sourceKey = (name) => {
+        const n = String(name || '').toLowerCase();
+        if (/uqload|strema/.test(n)) return 'uqload';
+        if (/mixdrop|mix/.test(n)) return 'mixdrop';
+        if (/streamhg|streamwish|wish/.test(n)) return 'streamhg';
+        return n.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'source';
+      };
+      const copyKey = String(t.label || 'default').toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/g, '-').replace(/^-|-$/g, '') || 'default';
+      const episodeFilename = (srv) => `stardima-${copyKey}-${sourceKey(srv.name)}-S${String(playbackSeason).padStart(2, '0')}E${String(playbackEpisode).padStart(2, '0')}.mp4`;
+      const bingeGroup = (srv) => `stardima|${copyKey}|${sourceKey(srv.name)}`;
       for (const srv of (list || [])) {
         // a host we just proved dead is not offered at all — tapping it only wastes your time
-        if (serverHealth(srv) === 'bad') continue;
-        const edgeDead = DEAD_FROM_EDGE.test((srv.name || '') + ' ' + (srv.embedUrl || ''));
+        if (serverHealth(srv) === 'bad') { failed.push(srv); continue; }
+        // wrappers aside, judge the host that actually serves the file
+        const realUrl = unwrapEmbed(srv.embedUrl);
+        const edgeDead = DEAD_FROM_EDGE.test((srv.name || '') + ' ' + (realUrl || ''));
         const bits = [];
         if (t.label) bits.push(t.label);
-        if (edgeDead) bits.push('قد لا يعمل من السحابة');
-        // what you pick matters: show the real quality and whether the host answered
+        if (edgeDead) bits.push('قد لا يعمل');
+        // what you pick matters: show the real quality and whether the host answered.
+        // qh was measured on Uqload's copy, so it is only shown on that row.
         const marks = [];
-        if (qh) marks.push(qh + 'p');
+        if (qh && /uqload|strema\.top/i.test((srv.name || '') + ' ' + (srv.embedUrl || ''))) marks.push(arabicNum(qh) + 'p');
         if (serverHealth(srv) === 'ok') marks.push('✓ يعمل');
+        const resolved = serverResolved(srv);
+        const baseName = srv.name + (marks.length ? ' · ' + marks.join(' · ') : '');
+        const baseTitle = bits.length ? bits.join(' · ') : (srv.is_vip ? 'VIP' : srv.name);
+        if (resolved && resolved.url) {
+          const requestHeaders = { 'User-Agent': UA };
+          if (resolved.referer) {
+            requestHeaders.Referer = resolved.referer;
+            try { requestHeaders.Origin = new URL(resolved.referer).origin; } catch (e) { /* optional */ }
+          }
+          collected.push({
+            name: baseName + ' · مباشر',
+            title: baseTitle + ' · بدون استهلاك بروكسي',
+            url: resolved.url,
+            behaviorHints: {
+              notWebReady: true,
+              bingeGroup: bingeGroup(srv),
+              filename: episodeFilename(srv),
+              proxyHeaders: { request: requestHeaders },
+            },
+          });
+        }
+        // Kept as a clearly-labelled fallback for clients/hosts which ignore proxyHeaders.
         collected.push({
-          name: srv.name + (marks.length ? ' · ' + marks.join(' · ') : ''),
-          title: bits.length ? bits.join(' · ') : (srv.is_vip ? 'VIP' : srv.name),
+          name: baseName + ' · احتياطي',
+          title: baseTitle + ' · عبر السحابة',
           url: `${origin}/proxy/embed?u=${b64url(srv.embedUrl)}&n=${b64url(srv.name || '')}`,
-          behaviorHints: { notWebReady: true, bingeGroup: (t.label || '') + '|' + srv.name },
+          behaviorHints: { notWebReady: true, bingeGroup: bingeGroup(srv) + '|cloud', filename: episodeFilename(srv) },
+        });
+        shownHere++;
+      }
+      // Every host failed the six-second probe. Playback retries five times with a
+      // backoff and often gets through where the quick probe did not, so offer the best
+      // of them anyway — clearly marked, never with a ✓ it did not earn.
+      if (!shownHere && failed.length) {
+        const srv = failed[0];
+        const marks = qh && /uqload|strema\.top/i.test((srv.name || '') + ' ' + (srv.embedUrl || '')) ? ' · ' + arabicNum(qh) + 'p' : '';
+        collected.push({
+          name: srv.name + marks,
+          title: 'ما جاوب في الفحص السريع — قد يشتغل عند التشغيل',
+          url: `${origin}/proxy/embed?u=${b64url(srv.embedUrl)}&n=${b64url(srv.name || '')}`,
+          behaviorHints: { notWebReady: true, bingeGroup: bingeGroup(srv), filename: episodeFilename(srv) },
         });
       }
     }
@@ -1383,7 +1658,17 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       const hdrs = { 'User-Agent': UA, Accept: '*/*' };
       if (referer) hdrs.Referer = referer;
       const range = req.headers.get('range'); if (range) hdrs.Range = range;
-      const up = await fetchT(target, { headers: hdrs, redirect: 'follow' }, 15000);
+      // Segments are fetched hundreds of times per episode and the video CDNs drop the
+      // odd request, which the player shows as a stall. Retry those, never a real 404.
+      let up = null, lastErr = null;
+      for (let i = 0; i < 3; i++) {
+        if (i) await sleep(250 * i);
+        try { up = await fetchT(target, { headers: hdrs, redirect: 'follow' }, 15000); }
+        catch (e) { lastErr = e; up = null; continue; }
+        if (up.ok) break;
+        if (up.status < 500 && up.status !== 429) break;
+      }
+      if (!up) return textResponse('proxy error: ' + ((lastErr && lastErr.message) || 'no response'), 502);
       if (!up.ok) return textResponse('upstream ' + up.status, up.status);
       const ctype = up.headers.get('content-type') || '';
       if (/\.m3u8(\?|$)/i.test(target) || /mpegurl/i.test(ctype)) {
