@@ -1,6 +1,6 @@
 # 🌟 كرتون زمان | Krtoon Zaman — Stremio & Nuvio Addon
 
-[![Version](https://img.shields.io/badge/version-v3.9.0-blue.svg)](https://github.com/Albrall/stardima-addon/releases)
+[![Version](https://img.shields.io/badge/version-v3.10.0-blue.svg)](https://github.com/Albrall/stardima-addon/releases)
 [![Cloudflare Workers](https://img.shields.io/badge/deployed_on-Cloudflare_Workers-orange.svg)](https://workers.cloudflare.com)
 [![CI/CD](https://github.com/Albrall/stardima-addon/actions/workflows/deploy.yml/badge.svg)](https://github.com/Albrall/stardima-addon/actions/workflows/deploy.yml)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-green.svg)](https://nodejs.org)
