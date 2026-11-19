@@ -882,6 +882,8 @@ async function buildManifest(url) {
   return {
     id: ID, version: VERSION, name: NAME,
     description: 'مكتبة كرتون كاملة مرتبة أبجديًا — ' + sN + ' مسلسل و' + mN + ' فيلم، مع الحلقات وبث مباشر',
+    logo: `${url.origin}/logo.svg`,
+    background: `${url.origin}/background.svg`,
     resources: ['catalog', 'meta', 'stream'], types: ['series', 'movie'],
     idPrefixes: ['tt', 'tmdb:', 'stardima:', 'jcseries-', 'jcartoon-', 'jcartoon:'], catalogs: [...series, ...movies],
     behaviorHints: { configurableFor: false, configurationRequired: false },
@@ -1013,6 +1015,66 @@ function maybeSelfCheck(ctx) {
   })().catch(() => {});
   try { ctx && ctx.waitUntil(p); } catch (e) { /* no ctx */ }
 }
+const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="50%" stop-color="#1e1b4b"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="tv" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="100%" stop-color="#eab308"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="8" y="8" width="496" height="496" rx="104" fill="none" stroke="#38bdf8" stroke-width="4" stroke-opacity="0.3"/>
+  <line x1="210" y1="120" x2="150" y2="45" stroke="#94a3b8" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="150" cy="45" r="14" fill="url(#gold)"/>
+  <line x1="302" y1="120" x2="362" y2="45" stroke="#94a3b8" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="362" cy="45" r="14" fill="url(#gold)"/>
+  <rect x="76" y="115" width="360" height="270" rx="36" fill="#1e293b" stroke="url(#tv)" stroke-width="8" filter="url(#glow)"/>
+  <rect x="106" y="145" width="235" height="210" rx="20" fill="url(#screen)" stroke="#334155" stroke-width="4"/>
+  <circle cx="385" cy="190" r="18" fill="#334155" stroke="#64748b" stroke-width="3"/>
+  <circle cx="385" cy="245" r="18" fill="#334155" stroke="#64748b" stroke-width="3"/>
+  <line x1="365" y1="295" x2="405" y2="295" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+  <line x1="365" y1="315" x2="405" y2="315" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+  <line x1="365" y1="335" x2="405" y2="335" stroke="#475569" stroke-width="4" stroke-linecap="round"/>
+  <path d="M 223 180 L 234 212 L 268 212 L 241 232 L 251 264 L 223 244 L 195 264 L 205 232 L 178 212 L 212 212 Z" fill="url(#gold)" filter="url(#glow)"/>
+  <circle cx="155" cy="190" r="4" fill="#38bdf8"/>
+  <circle cx="285" cy="270" r="5" fill="#38bdf8"/>
+  <text x="256" y="445" font-family="system-ui, -apple-system, sans-serif" font-size="44" font-weight="900" fill="#ffffff" text-anchor="middle" letter-spacing="1">كرتون زمان</text>
+  <text x="256" y="480" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="600" fill="#38bdf8" text-anchor="middle" letter-spacing="3">KRTOON ZAMAN</text>
+</svg>`;
+
+const BACKGROUND_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080">
+  <defs>
+    <radialGradient id="grad" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="60%" stop-color="#0b1020"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </radialGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#grad)"/>
+  <circle cx="300" cy="250" r="3" fill="#38bdf8" opacity="0.6"/>
+  <circle cx="1600" cy="350" r="2.5" fill="#fde047" opacity="0.5"/>
+  <circle cx="950" cy="150" r="2" fill="#ffffff" opacity="0.4"/>
+  <circle cx="1300" cy="800" r="3.5" fill="#38bdf8" opacity="0.4"/>
+  <circle cx="450" cy="750" r="2" fill="#fde047" opacity="0.3"/>
+</svg>`;
+
 async function handleRequest(url, req, ctx) {
   _ctx = ctx || _ctx;
   let path = url.pathname;
@@ -1020,6 +1082,12 @@ async function handleRequest(url, req, ctx) {
   if (path.endsWith('.json')) path = path.slice(0, -5);
 
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+  if (path === '/logo.svg' || path === '/logo.png') {
+    return new Response(LOGO_SVG, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400', ...CORS_HEADERS } });
+  }
+  if (path === '/background.svg' || path === '/background.png') {
+    return new Response(BACKGROUND_SVG, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400', ...CORS_HEADERS } });
+  }
   if (path === '/manifest.json' || path === '/manifest') { maybeSelfCheck(_ctx); return json(await buildManifest(url)); }
   if (path === '/' || path === '/configure') {
     return new Response(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
@@ -1033,7 +1101,8 @@ button,.btn{display:inline-block;margin:12px 6px 0 0;padding:12px 18px;backgroun
 ol,ul{padding-inline-start:20px;opacity:.92}
 hr{border:0;border-top:1px solid #24305a;margin:20px 0}
 small{opacity:.6}</style></head><body><div class="card">
-<h1 style="margin:0 0 6px;font-size:21px">🎬 ${NAME}</h1>
+<img src="${url.origin}/logo.svg" alt="${NAME}" width="84" height="84" style="display:block;margin:0 auto 14px;border-radius:20px;box-shadow:0 8px 24px rgba(56,189,248,0.2)">
+<h1 style="margin:0 0 6px;font-size:21px;text-align:center">🎬 ${NAME}</h1>
 <p style="opacity:.8;margin:0 0 16px">${(((INDEX.series || {}).items) || []).filter((it) => !isAlias(it[0])).length + jcStandalone('series').length} مسلسل · ${(((INDEX.movies || {}).items) || []).filter((it) => !isAlias(it[0])).length + jcStandalone('movies').length} فيلم · حلقات · بحث · بث مباشر</p>
 <p style="margin:0 0 6px">رابط الأدئون (الصقه في Nuvio أو Stremio):</p>
 <input id="u" readonly value="${url.origin}/manifest.json" onclick="this.select()">
@@ -1705,7 +1774,10 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         if (epNo != null) direct = dimaStreams(slug, season, epNo);
       }
     } catch (e) { /* no direct copy for this one */ }
-    return json({ streams: jcFirst.concat(collected).concat(direct) });
+    const directFast = collected.filter((s) => (s.name || '').includes('مباشر'));
+    const cloudFallback = collected.filter((s) => !(s.name || '').includes('مباشر'));
+    const finalStreams = [...jcFirst, ...directFast, ...direct, ...cloudFallback];
+    return json({ streams: finalStreams });
   }
 
 

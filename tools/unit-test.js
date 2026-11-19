@@ -66,12 +66,22 @@ test('Worker Bundle Integration Check', async () => {
   assert.equal(manifestRes.status, 200);
   const manifest = await manifestRes.json();
   assert.equal(manifest.version, '3.9.0');
+  assert.match(manifest.logo, /logo\.svg/);
+  assert.match(manifest.background, /background\.svg/);
   const catalogIds = manifest.catalogs.map(c => c.id);
   assert.ok(catalogIds.includes('stardima-new'));
   assert.ok(catalogIds.includes('stardima-spacetoon'));
   assert.ok(catalogIds.includes('stardima-classic'));
   assert.equal(manifest.catalogs[0].id, 'stardima-new');
   assert.match(manifest.catalogs[0].name, /أحدث المسلسلات/);
+
+  // Test /logo.svg endpoint
+  const logoReq = new Request('http://localhost:7000/logo.svg');
+  const logoRes = await worker.fetch(logoReq, {}, { waitUntil: () => {} });
+  assert.equal(logoRes.status, 200);
+  assert.equal(logoRes.headers.get('content-type'), 'image/svg+xml');
+  const logoText = await logoRes.text();
+  assert.match(logoText, /<svg/);
 
   // Test /catalog/series/stardima-spacetoon.json
   const stReq = new Request('http://localhost:7000/catalog/series/stardima-spacetoon.json');
