@@ -1,6 +1,6 @@
 # 🌟 كرتون زمان | Krtoon Zaman — Stremio & Nuvio Addon
 
-[![Version](https://img.shields.io/badge/version-v3.8.1-blue.svg)](https://github.com/Albrall/stardima-addon/releases)
+[![Version](https://img.shields.io/badge/version-v3.9.0-blue.svg)](https://github.com/Albrall/stardima-addon/releases)
 [![Cloudflare Workers](https://img.shields.io/badge/deployed_on-Cloudflare_Workers-orange.svg)](https://workers.cloudflare.com)
 [![CI/CD](https://github.com/Albrall/stardima-addon/actions/workflows/deploy.yml/badge.svg)](https://github.com/Albrall/stardima-addon/actions/workflows/deploy.yml)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-green.svg)](https://nodejs.org)
@@ -41,13 +41,13 @@
 
 | الكتالوج | المعرف (ID) | الوصف |
 | :--- | :--- | :--- |
-| **مسلسلات كرتون زمان** | `stardima` | المكتبة الكاملة للمسلسلات مرتبة أبجدياً |
-| **جدول العرض اليومي** | `stardima-daily` | الحلقات المضافة حديثاً وفق جدول الموقع |
-| **أحدث المسلسلات** | `stardima-new` | جديد المسلسلات والإضافات الأخيرة |
-| **مسلسلات بجودة HD** | `stardima-hd` | الأعمال المتاحة بجودة عالية |
-| **الأعلى تقييماً ومتابعة** | `stardima-top` | الأعمال الكرتونية الأكثر شهرة وطلباً |
-| **أفلام كرتون زمان** | `stardima-movies` / `stardima-new-movies` | كافة الأفلام الكرتونية وأحدثها |
-| **أفلام ومسلسلات 1080p** | `jcartoon` | أعمال حصرية بدقة Full HD من مصدر جي كرتون |
+| **🔥 أحدث المسلسلات / الأفلام** | `stardima-new` / `stardima-new-movies` | جديد الإضافات والحلقات أولاً بأول |
+| **⭐ الأكثر شهرة وتقييماً** | `stardima-top` / `stardima-top-movies` | الأعمال الأعلى تقييماً والأكثر متابعة |
+| **📺 كواكب سبيستون والزهرة** | `stardima-spacetoon` | كافة أعمال ومسلسلات سبيستون وسبيس باور والزهرة |
+| **⏳ كرتون الطيبين (كلاسيك)** | `stardima-classic` / `stardima-classic-movies` | مسلسلات وأفلام الزمن الجميل والعصر الذهبي (قبل 2005) |
+| **🎲 اقتراحات اليوم** | `stardima-daily` / `stardima-daily-movies` | ترشيحات ذكية متجددة يومياً حسب ثيمات مختارة |
+| **📚 كل المسلسلات / الأفلام (أ-ي)** | `stardima` / `stardima-movies` | المكتبة الكاملة مع دعم البحث وفلاتر التصنيف والجودة |
+| **💎 جودة عالية 720p+** | `stardima-hd` / `stardima-hd-movies` | أعمال بجودة عالية تتضمن نسخ Full HD 1080p |
 
 ---
 

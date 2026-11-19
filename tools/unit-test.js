@@ -56,9 +56,36 @@ test('Worker Bundle Integration Check', async () => {
   const res = await worker.fetch(req, {}, { waitUntil: () => {} });
   assert.equal(res.status, 200);
   const data = await res.json();
-  assert.equal(data.version, '3.8.1');
+  assert.equal(data.version, '3.9.0');
   assert.equal(typeof data.index.series, 'number');
   assert.ok(data.index.series > 1000);
+
+  // Test /manifest.json catalogs and order
+  const manifestReq = new Request('http://localhost:7000/manifest.json');
+  const manifestRes = await worker.fetch(manifestReq, {}, { waitUntil: () => {} });
+  assert.equal(manifestRes.status, 200);
+  const manifest = await manifestRes.json();
+  assert.equal(manifest.version, '3.9.0');
+  const catalogIds = manifest.catalogs.map(c => c.id);
+  assert.ok(catalogIds.includes('stardima-new'));
+  assert.ok(catalogIds.includes('stardima-spacetoon'));
+  assert.ok(catalogIds.includes('stardima-classic'));
+  assert.equal(manifest.catalogs[0].id, 'stardima-new');
+  assert.match(manifest.catalogs[0].name, /أحدث المسلسلات/);
+
+  // Test /catalog/series/stardima-spacetoon.json
+  const stReq = new Request('http://localhost:7000/catalog/series/stardima-spacetoon.json');
+  const stRes = await worker.fetch(stReq, {}, { waitUntil: () => {} });
+  assert.equal(stRes.status, 200);
+  const stData = await stRes.json();
+  assert.ok(Array.isArray(stData.metas) && stData.metas.length > 50);
+
+  // Test /catalog/series/stardima-classic.json
+  const clReq = new Request('http://localhost:7000/catalog/series/stardima-classic.json');
+  const clRes = await worker.fetch(clReq, {}, { waitUntil: () => {} });
+  assert.equal(clRes.status, 200);
+  const clData = await clRes.json();
+  assert.ok(Array.isArray(clData.metas) && clData.metas.length > 50);
 
   // Test /proxy domain allowlist security (block disallowed external hosts)
   const forbiddenReq = new Request('http://localhost:7000/proxy?u=' + Buffer.from('https://evil-hacker.com/malware.exe').toString('base64url'));

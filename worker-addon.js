@@ -25,7 +25,7 @@ const NAME = 'كرتون زمان';
 //   Lulustream ✗ the CDN behind it (tnmr.org) 403s the segments
 // Anything still listed here gets a warning label instead of being hidden.
 const DEAD_FROM_EDGE = /lulustream|savefiles|hgcloud|streamhg/i;
-const VERSION = '3.8.1';
+const VERSION = '3.9.0';
 const ID = 'community.stardima';
 const CHUNK_SIZE = 450; // items per chunked catalog
 // 'single'  = two long catalogs (all series, all movies) — one list, nothing to navigate
@@ -369,9 +369,12 @@ function familyOf(slug) {
   if (p && F.families && F.families[p]) return { primary: p, fam: F.families[p] };
   return null;
 }
-function langLabel(slug) {
+function langLabel(slug, title) {
+  const t = String(title || '');
+  if (/بالمصرية|اللهجة المصرية|دبلجة مصرية/i.test(t)) return '🇪🇬 مدبلج مصري';
+  if (/سبيستون|مركز الزهرة/i.test(t)) return '🎙️ دبلجة فصحى (الزهرة)';
   const l = ((INDEX.families || {}).lang || {})[slug];
-  return l === 'dub' ? '🇸🇦 مدبلج' : l === 'sub' ? 'E مترجم' : '';
+  return l === 'dub' ? '🎙️ مدبلج للعربية' : l === 'sub' ? '📝 مترجم للعربية' : '';
 }
 function primarySlug(slug) {
   const p = ((INDEX.families || {}).memberOf || {})[slug];
@@ -708,10 +711,10 @@ async function jcUrlForMovie(id) {
 function jcStreams(fresh, origin, label, group) {
   const u = (fresh && fresh.url) || fresh;              // movies hand back a plain URL
   const h = (fresh && fresh.h) || 0;
-  const q = h ? arabicNum(h) + 'p' : '١٠٨٠p';
+  const q = h ? arabicNum(h) + 'p' : '١٠٨٠p Full HD';
   return [
-    { name: q, title: label + ' — مباشر', url: u, behaviorHints: { notWebReady: true, bingeGroup: group } },
-    { name: q + ' · بديل', title: label + ' — عبر السحابة (لو تعطّل المباشر)', url: `${origin}/proxy?u=${b64url(u)}`, behaviorHints: { notWebReady: true, bingeGroup: group + '-p' } },
+    { name: '💎 ' + q, title: label + ' — تشغيل مباشر فائق الجودة', url: u, behaviorHints: { notWebReady: true, bingeGroup: group } },
+    { name: '💎 ' + q + ' · سحابي', title: label + ' — عبر السحابة (بديل)', url: `${origin}/proxy?u=${b64url(u)}`, behaviorHints: { notWebReady: true, bingeGroup: group + '-p' } },
   ];
 }
 
@@ -837,25 +840,26 @@ async function buildManifest(url) {
     const genreExtra = genreOptions().length
       ? [{ name: 'genre', options: genreOptions(), isRequired: false }] : [];
     const today = dailyTheme().theme.name;
-    series.push({ id: 'stardima-daily', type: 'series', name: `${NAME}: اقتراحات اليوم — ${today}` });
-    series.push({ id: 'stardima', type: 'series', name: `${NAME}: كل المسلسلات (أ-ي)`, extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
-    series.push({ id: 'stardima-new', type: 'series', name: `${NAME}: أحدث المسلسلات`, extra: searchExtra });
-    movies.push({ id: 'stardima-daily-movies', type: 'movie', name: `${NAME}: أفلام مقترحة اليوم — ${today}` });
-    movies.push({ id: 'stardima-movies', type: 'movie', name: `${NAME}: كل الأفلام (أ-ي)`, extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
-    movies.push({ id: 'stardima-new-movies', type: 'movie', name: `${NAME}: أحدث الأفلام`, extra: searchExtra });
-    // مصدر ثانٍ: jcartoon.top — كل عنصر فيه فيديو واحد بجودة FULL HD
-    if ((((INDEX.quality || {}).items) && Object.keys(INDEX.quality.items).length)) {
-    const qs = INDEX.quality.items;
+    const topN = topRatedCount();
     const hdS = jcHdCount('series');
     const hdM = jcHdCount('movies');
-    if (hdS) series.push({ id: 'stardima-hd', type: 'series', name: `${NAME}: ٧٢٠p فأعلى (${arabicNum(hdS)})`, extra: [...searchExtra] });
-    if (hdM) movies.push({ id: 'stardima-hd-movies', type: 'movie', name: `${NAME}: أفلام ٧٢٠p فأعلى (${arabicNum(hdM)})`, extra: [...searchExtra] });
-    const topN = topRatedCount();
-    if (topN.s) series.push({ id: 'stardima-top', type: 'series', name: `${NAME}: الأعلى تقييمًا (${arabicNum(topN.s)})`, extra: [...searchExtra] });
-    if (topN.m) movies.push({ id: 'stardima-top-movies', type: 'movie', name: `${NAME}: أفلام الأعلى تقييمًا (${arabicNum(topN.m)})`, extra: [...searchExtra] });
-  }
-  // the second source is no longer a shelf of its own: its works sit inside the two
-  // lists above (and the 720p shelves), and its 1080p copies lead inside our entries
+
+    // مسلسلات: ترتيب واجهة أنيق وعصري
+    series.push({ id: 'stardima-new', type: 'series', name: '🔥 أحدث المسلسلات', extra: searchExtra });
+    if (topN.s) series.push({ id: 'stardima-top', type: 'series', name: `⭐ الأعلى تقييمًا (${arabicNum(topN.s)})`, extra: searchExtra });
+    series.push({ id: 'stardima-spacetoon', type: 'series', name: '📺 كواكب سبيستون والزهرة', extra: searchExtra });
+    series.push({ id: 'stardima-classic', type: 'series', name: '⏳ كرتون الطيبين (كلاسيك)', extra: searchExtra });
+    series.push({ id: 'stardima-daily', type: 'series', name: `🎲 اقتراحات اليوم — ${today}`, extra: searchExtra });
+    series.push({ id: 'stardima', type: 'series', name: '📚 كل المسلسلات (أ-ي)', extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
+    if (hdS) series.push({ id: 'stardima-hd', type: 'series', name: `💎 جودة ٧٢٠p فأعلى (${arabicNum(hdS)})`, extra: searchExtra });
+
+    // أفلام: ترتيب منظم ومرن
+    movies.push({ id: 'stardima-new-movies', type: 'movie', name: '🔥 أحدث الأفلام', extra: searchExtra });
+    if (topN.m) movies.push({ id: 'stardima-top-movies', type: 'movie', name: `⭐ أفلام الأعلى تقييمًا (${arabicNum(topN.m)})`, extra: searchExtra });
+    movies.push({ id: 'stardima-classic-movies', type: 'movie', name: '⏳ أفلام كلاسيكية (الزمن الجميل)', extra: searchExtra });
+    movies.push({ id: 'stardima-daily-movies', type: 'movie', name: `🎲 أفلام مقترحة اليوم — ${today}`, extra: searchExtra });
+    movies.push({ id: 'stardima-movies', type: 'movie', name: '📚 كل الأفلام (أ-ي)', extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
+    if (hdM) movies.push({ id: 'stardima-hd-movies', type: 'movie', name: `💎 أفلام ٧٢٠p فأعلى (${arabicNum(hdM)})`, extra: searchExtra });
   } else {
     const sChunks = chunkCount('series'), mChunks = chunkCount('movies');
     for (let c = 1; c <= sChunks; c++) series.push({
@@ -1181,7 +1185,64 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     // rotation gives a fresh, coherent set every day in Riyadh time.
     if (id === 'stardima-daily' || id === 'stardima-daily-movies') {
       const dailyKey = id === 'stardima-daily' ? 'series' : 'movies';
-      return json({ metas: dailyRecommendationItems(dailyKey, 20).map(toMeta) });
+      const metas = dailyRecommendationItems(dailyKey, 20).map(toMeta);
+      const q = (extras.search || '').trim();
+      const out = q ? metas.filter((x) => normTitle(x.name).indexOf(normTitle(q)) >= 0) : metas;
+      return json({ metas: out });
+    }
+
+    // Spacetoon & Venus Center shelf (كواكب سبيستون ومسلسلات مركز الزهرة)
+    if (id === 'stardima-spacetoon') {
+      const g = INDEX.genres || {};
+      const labels = g.labels || [];
+      const stSlugs = ['sbyston', 'asdarat-sbyston', 'sbys-baor'];
+      const stIdxs = stSlugs.map((s) => labels.findIndex((x) => x[0] === s)).filter((i) => i >= 0);
+      const rows = [];
+      const seen = new Set();
+      for (const it of (((INDEX.series || {}).items) || [])) {
+        if (isAlias(it[0])) continue;
+        const ps = primarySlug(it[0]);
+        if (seen.has(ps)) continue;
+        const raw = ',' + (g.items[it[0]] || '') + ',' + (g.items[ps] || '') + ',';
+        if (stIdxs.some((i) => raw.includes(',' + i + ','))) {
+          seen.add(ps);
+          rows.push(toMeta(it));
+        }
+      }
+      rows.sort((a, b) => byTitleAr(a.name, b.name));
+      const q = (extras.search || '').trim();
+      const out = q ? rows.filter((x) => normTitle(x.name).indexOf(normTitle(q)) >= 0) : rows;
+      return json({ metas: out.slice(0, 500) });
+    }
+
+    // Classic golden era (كرتون الطيبين والزمن الجميل - قبل 2005)
+    if (id === 'stardima-classic' || id === 'stardima-classic-movies') {
+      const cKey = id === 'stardima-classic' ? 'series' : 'movies';
+      const g = INDEX.genres || {};
+      const og = INDEX.ourGenres || {};
+      const kzIdx = (g.labels || []).findIndex((x) => x[0] === 'krton-zman');
+      const clIdx = (og.labels || []).indexOf('كلاسيكي (قبل 2000)');
+      const rows = [];
+      const seen = new Set();
+      for (const it of (((INDEX[cKey] || {}).items) || [])) {
+        if (isAlias(it[0])) continue;
+        const ps = primarySlug(it[0]);
+        if (seen.has(ps)) continue;
+        const y = parseInt(it[3], 10);
+        const rawG = ',' + (g.items[it[0]] || '') + ',' + (g.items[ps] || '') + ',';
+        const rawOG = ',' + (og.items[it[0]] || '') + ',' + (og.items[ps] || '') + ',';
+        const isKz = kzIdx >= 0 && rawG.includes(',' + kzIdx + ',');
+        const isCl = clIdx >= 0 && rawOG.includes(',' + clIdx + ',');
+        const isRetro = y > 1950 && y <= 2004;
+        if (isKz || isCl || isRetro) {
+          seen.add(ps);
+          rows.push({ card: toMeta(it), year: y || 1995 });
+        }
+      }
+      rows.sort((a, b) => (b.year - a.year) || byTitleAr(a.card.name, b.card.name));
+      const q = (extras.search || '').trim();
+      const out = q ? rows.filter((x) => normTitle(x.card.name).indexOf(normTitle(q)) >= 0) : rows;
+      return json({ metas: out.map((x) => x.card).slice(0, 500) });
     }
 
     // top-rated shelf: needs a real vote count, otherwise a 10.0 from three people wins
@@ -1327,9 +1388,10 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     meta.imdb_id = IDS[slug] || undefined;
     meta.moviedb_id = TMDB[slug] ? Number(TMDB[slug].id) : undefined;
     const gs = genreBreakdown(slug); if (gs.length) meta.genres = gs;
-    const qh = qOf(slug);
+    const ps = primarySlug(slug);
+    const qh = qOf(slug) || qOf(ps);
     if (qh) meta.description = `الجودة الحقيقية: ${qh}p\n` + (meta.description || '');
-    const rr = rOf('stardima:' + slug);
+    const rr = rOf('stardima:' + slug) || rOf('stardima:' + ps);
     if (rr) {
       const bk = backOf(rr);
       if (bk) meta.background = bk;
@@ -1337,6 +1399,10 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       const head = rr.vote ? `★ ${rr.vote}/10 من TMDB\n` : '';
       const body = rr.overview ? rr.overview + '\n' : '';
       if (head || body) meta.description = head + body + (meta.description || '');
+    }
+    const audioBadge = langLabel(slug, meta.name || '');
+    if (audioBadge) {
+      meta.description = `【${audioBadge}】\n` + (meta.description || '');
     }
     // Show which versions this work has (dubbed / subbed / uncut …) on the entry itself.
     const fm = familyOf(slug);
@@ -1479,7 +1545,9 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       }
     }
     if (!targets.length) {
-      targets.push({ memberSlug: slug, label: langLabel(slug), epId: useEpId || null });
+      const idxItem = (((INDEX[type === 'movie' ? 'movies' : 'series'] || {}).items) || []).find((it) => it[0] === slug);
+      const itemTitle = idxItem ? idxItem[1] : '';
+      targets.push({ memberSlug: slug, label: langLabel(slug, itemTitle), epId: useEpId || null });
     }
 
     // Same work also lives on jcartoon at 1080p? Put that copy first — better wins.
@@ -1588,7 +1656,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           }
           collected.push({
             name: baseName + ' · مباشر',
-            title: baseTitle + ' · بدون استهلاك بروكسي',
+            title: baseTitle + ' · تشغيل فوري بدون بروكسي',
             url: resolved.url,
             behaviorHints: {
               notWebReady: true,
@@ -1600,8 +1668,8 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
         }
         // Kept as a clearly-labelled fallback for clients/hosts which ignore proxyHeaders.
         collected.push({
-          name: baseName + ' · احتياطي',
-          title: baseTitle + ' · عبر السحابة',
+          name: baseName + ' · سحابي',
+          title: baseTitle + ' · عبر السحابة (Cloudflare)',
           url: `${origin}/proxy/embed?u=${b64url(srv.embedUrl)}&n=${b64url(srv.name || '')}`,
           behaviorHints: { notWebReady: true, bingeGroup: bingeGroup(srv) + '|cloud', filename: episodeFilename(srv) },
         });
