@@ -56,7 +56,7 @@ test('Worker Bundle Integration Check', async () => {
   const res = await worker.fetch(req, {}, { waitUntil: () => {} });
   assert.equal(res.status, 200);
   const data = await res.json();
-  assert.equal(data.version, '3.9.0');
+  assert.equal(data.version, '3.10.0');
   assert.equal(typeof data.index.series, 'number');
   assert.ok(data.index.series > 1000);
 
@@ -65,7 +65,7 @@ test('Worker Bundle Integration Check', async () => {
   const manifestRes = await worker.fetch(manifestReq, {}, { waitUntil: () => {} });
   assert.equal(manifestRes.status, 200);
   const manifest = await manifestRes.json();
-  assert.equal(manifest.version, '3.9.0');
+  assert.equal(manifest.version, '3.10.0');
   assert.match(manifest.logo, /logo\.svg/);
   assert.match(manifest.background, /background\.svg/);
   const catalogIds = manifest.catalogs.map(c => c.id);
@@ -97,11 +97,28 @@ test('Worker Bundle Integration Check', async () => {
   const clData = await clRes.json();
   assert.ok(Array.isArray(clData.metas) && clData.metas.length > 50);
 
-  // Test /proxy domain allowlist security (block disallowed external hosts)
-  const forbiddenReq = new Request('http://localhost:7000/proxy?u=' + Buffer.from('https://evil-hacker.com/malware.exe').toString('base64url'));
-  const forbiddenRes = await worker.fetch(forbiddenReq, {}, { waitUntil: () => {} });
-  assert.equal(forbiddenRes.status, 403);
-  const forbiddenText = await forbiddenRes.text();
-  assert.match(forbiddenText, /forbidden/i);
+  // Test /proxy domain allowlist security (block disallowed external hosts & bypass attempts)
+  const bypassHosts = [
+    'https://evil-hacker.com/malware.exe',
+    'https://attackerstream.example/stream.m3u8',
+    'https://mixdrop.evil.com/video.mp4',
+    'https://evilmp4.org/file.mp4',
+    'https://fake-stardima.com/exploit.js',
+    'https://stardima.com.attacker.com/leak',
+  ];
+
+  for (const evilUrl of bypassHosts) {
+    const forbiddenReq = new Request('http://localhost:7000/proxy?u=' + Buffer.from(evilUrl).toString('base64url'));
+    const forbiddenRes = await worker.fetch(forbiddenReq, {}, { waitUntil: () => {} });
+    assert.equal(forbiddenRes.status, 403, `Should block ${evilUrl} on /proxy`);
+
+    const embedReq = new Request('http://localhost:7000/proxy/embed?u=' + Buffer.from(evilUrl).toString('base64url'));
+    const embedRes = await worker.fetch(embedReq, {}, { waitUntil: () => {} });
+    assert.equal(embedRes.status, 403, `Should block ${evilUrl} on /proxy/embed`);
+
+    const resolveReq = new Request('http://localhost:7000/resolve/' + encodeURIComponent(evilUrl));
+    const resolveRes = await worker.fetch(resolveReq, {}, { waitUntil: () => {} });
+    assert.equal(resolveRes.status, 403, `Should block ${evilUrl} on /resolve`);
+  }
 });
 

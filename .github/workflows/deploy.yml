@@ -21,6 +21,9 @@ jobs:
         with:
           node-version: 20
 
+      - name: Rebuild Worker Bundle Fresh
+        run: node src/build-worker.js
+
       - name: Run Automated Unit Tests
         run: npm test
 

@@ -18,7 +18,7 @@ const NAME = 'كرتون زمان';
 //   Lulustream ✗ the CDN behind it (tnmr.org) 403s the segments
 // Anything still listed here gets a warning label instead of being hidden.
 const DEAD_FROM_EDGE = /lulustream|savefiles|hgcloud|streamhg/i;
-const VERSION = '3.9.0';
+const VERSION = '3.10.0';
 const ID = 'community.stardima';
 const CHUNK_SIZE = 450; // items per chunked catalog
 // 'single'  = two long catalogs (all series, all movies) — one list, nothing to navigate
@@ -1774,10 +1774,51 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
   }
 
 
+const ALLOWED_TARGET_DOMAINS = [
+  'stardima.com',
+  'stardima.net',
+  'cartoon.com.im',
+  'hyperwatching.com',
+  'strema.top',
+  'savefiles.org',
+  'jcartoon.top',
+  'themoviedb.org',
+  'tmdb.org',
+  'tnmr.org',
+  'voe.sx',
+  'mp4upload.com',
+  // uqload
+  'uqload.to', 'uqload.co', 'uqload.io', 'uqload.ws', 'uqload.vc', 'uqload.is', 'uqload.com',
+  // mixdrop
+  'mixdrop.co', 'mixdrop.to', 'mixdrop.sx', 'mixdrop.is', 'mixdrop.bz', 'mixdrop.ch', 'mixdrop.ms', 'mixdrop.gl',
+  // goodstream
+  'goodstream.one', 'goodstream.co',
+  // streamwish / streamhg / hgcloud
+  'streamhg.com', 'hgcloud.to', 'streamwish.to', 'streamwish.com',
+  // dood
+  'dood.to', 'dood.so', 'dood.ws', 'dood.re', 'dood.pm', 'doodstream.com',
+  // vidmoly
+  'vidmoly.to', 'vidmoly.me',
+];
+
+function isPermittedHost(targetUrlOrHostname) {
+  if (!targetUrlOrHostname || typeof targetUrlOrHostname !== 'string') return false;
+  let hostname = targetUrlOrHostname.toLowerCase().trim();
+  try {
+    if (hostname.includes('://')) {
+      hostname = new URL(hostname).hostname.toLowerCase();
+    }
+  } catch (e) {
+    return false;
+  }
+  return ALLOWED_TARGET_DOMAINS.some(apex => hostname === apex || hostname.endsWith('.' + apex));
+}
+
   // /proxy/embed?u=<b64url embed> — resolve the host embed FRESH at playback time
   if (path === '/proxy/embed') {
     const embedUrl = unb64url(url.searchParams.get('u') || '');
     if (!embedUrl) return textResponse('missing embed', 400);
+    if (!isPermittedHost(embedUrl)) return textResponse('forbidden embed domain', 403);
     const origin = url.origin;
     let lastStatus = 0;
     // Hosts refuse in bursts: hammering them four times in the same second never
@@ -1830,9 +1871,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
 
     // Validate that the target host belongs to permitted video / CDN / source domains
     try {
-      const targetHostname = new URL(target).hostname.toLowerCase();
-      const isAllowedHost = /(?:stardima|cartoon\.com\.im|hyperwatching|uqload|strema|mixdrop|jcartoon|tmdb\.org|tnmr\.org|streamhg|savefiles|goodstream|dood|stream|mp4|m3u8)/i.test(targetHostname);
-      if (!isAllowedHost) return textResponse('forbidden target domain', 403);
+      if (!isPermittedHost(target)) return textResponse('forbidden target domain', 403);
     } catch (e) {
       return textResponse('invalid target url', 400);
     }
@@ -1868,6 +1907,7 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     try {
       const target = decodeURIComponent(path.slice(9));
       if (!/^https?:\/\//.test(target)) return new Response('bad', { status: 400, headers: CORS_HEADERS });
+      if (!isPermittedHost(target)) return new Response('forbidden target domain', { status: 403, headers: CORS_HEADERS });
       const out = await resolveHost(target);
       return json({ url: target, ...out });
     } catch (e) {

@@ -11,7 +11,7 @@ const { UA, resolveHost } = require('./lib/hosts');
 
 const PORT = process.env.PORT || 7000;
 const ADDON_ID = 'community.stardima.ar';
-const VERSION = '1.0.0';
+const VERSION = '3.10.0';
 
 // ---------- tiny in-memory cache ----------
 const cache = new Map();
@@ -239,7 +239,7 @@ async function handleStream(req, res, type, id) {
 
 // ---------- diagnostics: show what THIS host sees (direct vs worker relay) ----------
 async function handleDebug(req, res) {
-  const W = 'https://stardima-proxy.ingots-18joist.workers.dev';
+  const W = (process.env.STARDIMA_RELAY || 'https://stardima-proxy.ingots-18joist.workers.dev').replace(/\/+$/, '');
   const out = { host: 'render-or-local', ts: new Date().toISOString() };
   try { const r = await fetch(stardima.BASE + '/', { headers: { 'User-Agent': 'Mozilla/5.0' } }); out.direct_root = r.status; }
   catch (e) { out.direct_root = 'ERR ' + e.message; }
