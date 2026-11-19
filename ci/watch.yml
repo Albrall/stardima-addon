@@ -14,20 +14,20 @@ jobs:
       - name: Worker /health
         run: |
           set -e
-          curl -sS --max-time 60 https://stardima-proxy.ingots-18joist.workers.dev/health | tee /tmp/h.json
+          curl -sS --max-time 60 https://krtoonzaman.albranmaze7.workers.dev/health | tee /tmp/h.json
           grep -q '"ok":true' /tmp/h.json
 
       - name: Catalogue + newest shelf
         run: |
           set -e
-          n=$(curl -sS --max-time 60 "https://stardima-proxy.ingots-18joist.workers.dev/catalog/series/stardima.json" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["metas"]))')
+          n=$(curl -sS --max-time 60 "https://krtoonzaman.albranmaze7.workers.dev/catalog/series/stardima.json" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["metas"]))')
           echo "series in catalogue: $n"
           test "$n" -gt 1000
 
       - name: Playback chain (resolve + first segment)
         run: |
           set -e
-          curl -sS --max-time 90 "https://stardima-proxy.ingots-18joist.workers.dev/stream/series/stardima%3Avideo-58%3A1445.json" -o /tmp/s.json
+          curl -sS --max-time 90 "https://krtoonzaman.albranmaze7.workers.dev/stream/series/stardima%3Avideo-58%3A1445.json" -o /tmp/s.json
           url=$(python3 -c 'import json;print(json.load(open("/tmp/s.json"))["streams"][0]["url"])')
           curl -sS --max-time 60 "$url" -o /tmp/p.m3u8
           head -1 /tmp/p.m3u8 | grep -q EXTM3U

@@ -1,8 +1,12 @@
 // Serves the *production* Worker bundle over plain HTTP so it can be previewed
 // (and used as a local addon) with byte-for-byte identical behaviour.
-const http = require('http');
-const { Readable } = require('stream');
-const path = require('path');
+import http from 'http';
+import { Readable } from 'stream';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const PORT = parseInt(process.env.PORT || '7000', 10);
 const BUNDLE = path.join(__dirname, 'worker-addon.js');
