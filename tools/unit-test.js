@@ -20,10 +20,10 @@ test('Arabic Title Normalization (normTitle)', () => {
   assert.equal(stardima.normTitle('  سبيستون  '), 'سبيستون');
 });
 
-test('Arabic Collation Sorting (byTitleAr)', () => {
-  const titles = ['سبيستون', 'أبطال', 'بائع الحليب', 'توم وجيري'];
+test('Arabic Collation Sorting (byTitleAr - Arabic before English/Numbers)', () => {
+  const titles = ['CatDog', 'سبيستون', '101 مئة مرقش', 'أبطال', 'بائع الحليب', 'Ben 10', 'توم وجيري'];
   titles.sort(stardima.byTitleAr);
-  assert.deepEqual(titles, ['أبطال', 'بائع الحليب', 'توم وجيري', 'سبيستون']);
+  assert.deepEqual(titles, ['أبطال', 'بائع الحليب', 'توم وجيري', 'سبيستون', '101 مئة مرقش', 'Ben 10', 'CatDog']);
 });
 
 test('Unwrap Embed URL (unwrapEmbed)', () => {

@@ -212,7 +212,10 @@ function normTitle(t) {
 }
 function arKey(t) {
   const n = normTitle(t);
-  let out = '';
+  const clean = n.replace(/^[^\p{L}\p{N}]+/gu, '');
+  const first = clean[0] || '';
+  const isArabicStart = AR_ORDER.indexOf(first) >= 0;
+  let out = isArabicStart ? '0_' : '1_';
   for (const ch of n) {
     const i = AR_ORDER.indexOf(ch);
     out += i >= 0 ? String.fromCharCode(0xe000 + i) : ch;
