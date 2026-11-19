@@ -1,13 +1,15 @@
 {
   "name": "krtoon-zaman-addon",
-  "version": "3.8.0",
+  "version": "3.8.1",
   "private": true,
+  "type": "module",
   "description": "Arabic cartoons and anime catalog/stream addon for Stremio and Nuvio",
   "main": "serve-worker.js",
   "scripts": {
     "start": "node serve-worker.js",
     "build": "node src/build-worker.js",
-    "check": "node --check worker-addon.js && node --check serve-worker.js",
+    "check": "node --check serve-worker.js && node --check worker-addon.js",
+    "test": "node tools/unit-test.js",
     "smoke": "node tools/container-smoke.js"
   },
   "engines": {

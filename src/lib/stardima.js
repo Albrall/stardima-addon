@@ -278,10 +278,10 @@ async function getCatalog({ search, type, skip, limit } = {}) {
 // Search via the site's JSON search endpoint.
 async function searchCatalog(query) {
   const q = encodeURIComponent(query);
-  // The search endpoint is paginated (per_page ~12); walk every page so nothing
-  // is missed, then drop single-episode rows (/tvshow/<slug>/play/<id>).
+  // The search endpoint is paginated (per_page ~12); query the newest pages for recent
+  // additions without firing up to 10 sequential HTTP requests that stall TV clients.
   const first = await getJson('/search?query=' + q);
-  const lastPage = Math.min(((first && first.pagination && first.pagination.last_page) || 1), 10);
+  const lastPage = Math.min(((first && first.pagination && first.pagination.last_page) || 1), 2);
   let vids = ((first && first.videos) || []).slice();
   for (let p = 2; p <= lastPage; p++) {
     try {

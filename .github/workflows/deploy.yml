@@ -1,0 +1,57 @@
+name: Deploy to Cloudflare & Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run Automated Unit Tests
+        run: npm test
+
+      - name: Verify Bundle Syntax
+        run: npm run check
+
+      - name: Deploy to Cloudflare Worker
+        if: env.CF_API_TOKEN != '' && env.CF_ACCOUNT_ID != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN2 || secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID2 || secrets.CF_ACCOUNT_ID }}
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN2 || secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID2 || secrets.CF_ACCOUNT_ID }}
+
+      - name: Extract Version
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release with Changelog
+        uses: softprops/action-gh-release@v2
+        if: env.GITHUB_TOKEN != ''
+        with:
+          tag_name: ${{ steps.pkg.outputs.version }}
+          name: Release ${{ steps.pkg.outputs.version }}
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

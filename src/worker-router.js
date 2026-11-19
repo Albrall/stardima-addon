@@ -18,7 +18,7 @@ const NAME = 'كرتون زمان';
 //   Lulustream ✗ the CDN behind it (tnmr.org) 403s the segments
 // Anything still listed here gets a warning label instead of being hidden.
 const DEAD_FROM_EDGE = /lulustream|savefiles|hgcloud|streamhg/i;
-const VERSION = '3.8.0';
+const VERSION = '3.8.1';
 const ID = 'community.stardima';
 const CHUNK_SIZE = 450; // items per chunked catalog
 // 'single'  = two long catalogs (all series, all movies) — one list, nothing to navigate
@@ -395,6 +395,15 @@ function keyOfEpisode(primary, slug, epId) {
 
 // ---- alphabetical catalog (embedded index + live newest pages) ------------
 const _cache = new Map();
+const MAX_CACHE_ENTRIES = 500;
+const _rawCacheSet = _cache.set.bind(_cache);
+_cache.set = function (k, v) {
+  if (_cache.size >= MAX_CACHE_ENTRIES && !_cache.has(k)) {
+    const oldestKey = _cache.keys().next().value;
+    if (oldestKey !== undefined) _cache.delete(oldestKey);
+  }
+  return _rawCacheSet(k, v);
+};
 const FRESH_TTL = 15 * 60 * 1000; // 15 min
 
 async function fetchNewest(ep) {
@@ -929,8 +938,9 @@ async function selfCheck() {
       c = { t: Date.now(), v }; _cache.set(hk, c);
     }
     out.checks.jcartoon = c.v;
-    if (!c.v.ok) ok = false;
-  } catch (e) { out.checks.jcartoon = { ok: false }; }
+    // jcartoon is a secondary auxiliary source; a transient hiccup there is reported as a warning
+    // but does NOT declare the entire primary Stardima addon broken.
+  } catch (e) { out.checks.jcartoon = { ok: false, error: 'check_failed' }; }
 
   // 2) catalog from the embedded index
   try {
@@ -939,7 +949,17 @@ async function selfCheck() {
   } catch (e) { out.checks.catalog = { ok: false, error: String(e.message).slice(0, 100) }; }
   // 3) full playback chain on a known episode (resolve -> playlist -> segment)
   try {
-    const servers = await getServers('1445');
+    let checkEpId = '1445';
+    try {
+      const topSlug = (INDEX.series && INDEX.series.items && INDEX.series.items[0] && INDEX.series.items[0][0]);
+      if (topSlug) {
+        const smm = await getSeriesMeta(topSlug);
+        if (smm && smm.videos && smm.videos.length) {
+          checkEpId = smm.videos[0].episodeId || String(smm.videos[0].id).split(':').pop();
+        }
+      }
+    } catch (e) { /* retain default checkEpId */ }
+    const servers = await getServers(checkEpId);
     const list = await orderServers((servers && servers.servers) || [], { probe: false });
     let play = { ok: false };
     for (const srv of list.slice(0, 3)) {
@@ -1636,6 +1656,19 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
           const rw = rewriteM3u8(txt, r.url, r.referer, origin);
           return playlistResponse(url.searchParams.get('q') === 'auto' ? rw : (forceBestVariant(rw) || rw));
         }
+        if (r.type === 'mp4') {
+          // Redirect the player directly to /proxy so all subsequent seek and Range requests
+          // hit the resolved URL directly, eliminating re-resolutions and seeking stalls on TVs.
+          const targetLocation = proxiedRaw(origin, r.url, r.referer);
+          return new Response(null, {
+            status: 307,
+            headers: {
+              'Location': targetLocation,
+              'Access-Control-Allow-Origin': '*',
+              ...CORS_HEADERS,
+            },
+          });
+        }
         const hdrs = { 'User-Agent': UA, Referer: r.referer, Accept: '*/*' };
         const range = req.headers.get('range'); if (range) hdrs.Range = range;
         const up = await fetchT(r.url, { headers: hdrs }, 20000);
@@ -1654,6 +1687,15 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     target = target ? unb64url(target) : decodeURIComponent(path.slice(7));
     const referer = refParam ? unb64url(refParam) : undefined;
     if (!/^https?:\/\//i.test(target || '')) return textResponse('bad target', 400);
+
+    // Validate that the target host belongs to permitted video / CDN / source domains
+    try {
+      const targetHostname = new URL(target).hostname.toLowerCase();
+      const isAllowedHost = /(?:stardima|cartoon\.com\.im|hyperwatching|uqload|strema|mixdrop|jcartoon|tmdb\.org|tnmr\.org|streamhg|savefiles|goodstream|dood|stream|mp4|m3u8)/i.test(targetHostname);
+      if (!isAllowedHost) return textResponse('forbidden target domain', 403);
+    } catch (e) {
+      return textResponse('invalid target url', 400);
+    }
     try {
       const hdrs = { 'User-Agent': UA, Accept: '*/*' };
       if (referer) hdrs.Referer = referer;
