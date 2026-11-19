@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const ROOT = __dirname;
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, '..', 'package.json'), 'utf8'));
 const FILES = ['worker-router.js', 'lib/stardima.js', 'lib/resolver.js', 'lib/hosts.js', 'lib/unpacker.js'];
 
 function idOf(fromId, req) {
@@ -90,6 +91,7 @@ const indexLiteral = JSON.stringify({ built: idx.built, series: idx.series, movi
 function prep(f) {
   let code = fs.readFileSync(path.join(ROOT, f), 'utf8');
   if (f === 'worker-router.js') {
+    code = code.replace(/const VERSION = '[^']+';/, `const VERSION = ${JSON.stringify(pkg.version)};`);
     if (!code.includes('/*__INDEX__*/{}')) throw new Error('index placeholder missing in worker-router.js');
     code = code.replace('/*__INDEX__*/{}', indexLiteral);
     if (!code.includes("/*__IDS__*/''")) throw new Error('ids placeholder missing in worker-router.js');

@@ -53,6 +53,7 @@ jobs:
           tag_name: ${{ steps.pkg.outputs.version }}
           name: Release ${{ steps.pkg.outputs.version }}
           body_path: CHANGELOG.md
+          files: worker-addon.js
           draft: false
           prerelease: false
           generate_release_notes: true

@@ -1856,7 +1856,10 @@ function isPermittedHost(targetUrlOrHostname) {
         lastStatus = up.status;
         if (!up.ok) continue;
         return passthrough(up, req);
-      } catch (e) { lastStatus = 502; }
+      } catch (e) {
+        console.error('[proxy/embed] resolve error:', embedUrl, (e && e.message) || e);
+        lastStatus = 502;
+      }
     }
     return textResponse('could not resolve a working stream edge (last status ' + lastStatus + ')', lastStatus || 502);
   }
@@ -1885,11 +1888,19 @@ function isPermittedHost(targetUrlOrHostname) {
       for (let i = 0; i < 3; i++) {
         if (i) await sleep(250 * i);
         try { up = await fetchT(target, { headers: hdrs, redirect: 'follow' }, 15000); }
-        catch (e) { lastErr = e; up = null; continue; }
+        catch (e) {
+          lastErr = e;
+          console.error('[proxy] upstream attempt failed:', target, (e && e.message) || e);
+          up = null;
+          continue;
+        }
         if (up.ok) break;
         if (up.status < 500 && up.status !== 429) break;
       }
-      if (!up) return textResponse('proxy error: ' + ((lastErr && lastErr.message) || 'no response'), 502);
+      if (!up) {
+        console.error('[proxy] all attempts failed:', target, (lastErr && lastErr.message) || 'no response');
+        return textResponse('proxy error: ' + ((lastErr && lastErr.message) || 'no response'), 502);
+      }
       if (!up.ok) return textResponse('upstream ' + up.status, up.status);
       const ctype = up.headers.get('content-type') || '';
       if (/\.m3u8(\?|$)/i.test(target) || /mpegurl/i.test(ctype)) {
@@ -1899,6 +1910,7 @@ function isPermittedHost(targetUrlOrHostname) {
       }
       return passthrough(up, req);
     } catch (e) {
+      console.error('[proxy] unhandled error:', target, (e && e.message) || e);
       return textResponse('proxy error: ' + e.message, 502);
     }
   }
@@ -1911,6 +1923,7 @@ function isPermittedHost(targetUrlOrHostname) {
       const out = await resolveHost(target);
       return json({ url: target, ...out });
     } catch (e) {
+      console.error('[resolve] error:', (e && e.message) || e);
       return json({ error: e.message }, 500);
     }
   }
@@ -1932,6 +1945,7 @@ module.exports = {
       maybeSelfCheck(ctx);
       return await handleRequest(new URL(req.url), req, ctx);
     } catch (e) {
+      console.error('[worker-fetch] uncaught exception:', req.url, (e && e.stack) || (e && e.message) || e);
       return json({ error: e.message }, 500);
     }
   },

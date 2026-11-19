@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
+const pkg = require('../package.json');
 
 const stardima = require('../src/lib/stardima.js');
 const hosts = require('../src/lib/hosts.js');
@@ -56,7 +57,7 @@ test('Worker Bundle Integration Check', async () => {
   const res = await worker.fetch(req, {}, { waitUntil: () => {} });
   assert.equal(res.status, 200);
   const data = await res.json();
-  assert.equal(data.version, '3.10.0');
+  assert.equal(data.version, pkg.version);
   assert.equal(typeof data.index.series, 'number');
   assert.ok(data.index.series > 1000);
 
@@ -65,7 +66,7 @@ test('Worker Bundle Integration Check', async () => {
   const manifestRes = await worker.fetch(manifestReq, {}, { waitUntil: () => {} });
   assert.equal(manifestRes.status, 200);
   const manifest = await manifestRes.json();
-  assert.equal(manifest.version, '3.10.0');
+  assert.equal(manifest.version, pkg.version);
   assert.match(manifest.logo, /logo\.svg/);
   assert.match(manifest.background, /background\.svg/);
   const catalogIds = manifest.catalogs.map(c => c.id);

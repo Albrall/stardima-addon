@@ -11,7 +11,8 @@ const { UA, resolveHost } = require('./lib/hosts');
 
 const PORT = process.env.PORT || 7000;
 const ADDON_ID = 'community.stardima.ar';
-const VERSION = '3.10.0';
+let VERSION = '3.10.0';
+try { VERSION = require('../package.json').version; } catch (e) { /* fallback */ }
 
 // ---------- tiny in-memory cache ----------
 const cache = new Map();
