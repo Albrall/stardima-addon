@@ -121,5 +121,19 @@ test('Worker Bundle Integration Check', async () => {
     const resolveRes = await worker.fetch(resolveReq, {}, { waitUntil: () => {} });
     assert.equal(resolveRes.status, 403, `Should block ${evilUrl} on /resolve`);
   }
+
+  // Test IMDb mapping integrity (e.g. إيروكا, هزيم الرعد, strict 1-to-1 bijection)
+  const idsData = require('../src/ids.json');
+  assert.equal(idsData.map['69185154e10c1'], 'tt0302119', 'إيروكا must map to Idol Densetsu Eriko (tt0302119)');
+  assert.equal(idsData.map['6956bfc17f121'], 'tt0346280', 'هزيم الرعد must map to Thunder Jet (tt0346280)');
+  assert.equal(idsData.map['69e7e59bc7fc7'], 'tt0289036', 'يوميات أندي must map to What\'s with Andy? (tt0289036)');
+  assert.equal(idsData.map['68cbf047bd967'], 'tt8975220', 'سوبر سونيك سبنر must map to Super Yo-Yo (tt8975220)');
+
+  // Ensure strict 1-to-1 mapping (no two works share the same IMDb ID)
+  const imdbCount = {};
+  for (const [slug, imdb] of Object.entries(idsData.map)) {
+    imdbCount[imdb] = (imdbCount[imdb] || 0) + 1;
+    assert.equal(imdbCount[imdb], 1, `Duplicate IMDb mapping detected for ${imdb} (slug: ${slug})`);
+  }
 });
 
