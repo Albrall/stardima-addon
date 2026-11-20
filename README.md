@@ -1,6 +1,6 @@
 # 🌟 كرتون زمان | Krtoon Zaman — Stremio & Nuvio Addon
 
-[![Version](https://img.shields.io/badge/version-v3.10.1-blue.svg)](https://github.com/Albrall/stardima-addon/releases)
+[![Version](https://img.shields.io/badge/version-v3.10.2-blue.svg)](https://github.com/Albrall/stardima-addon/releases)
 [![Cloudflare Workers](https://img.shields.io/badge/deployed_on-Cloudflare_Workers-orange.svg)](https://workers.cloudflare.com)
 [![CI/CD](https://github.com/Albrall/stardima-addon/actions/workflows/deploy.yml/badge.svg)](https://github.com/Albrall/stardima-addon/actions/workflows/deploy.yml)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-green.svg)](https://nodejs.org)
@@ -44,6 +44,7 @@
 | **🔥 أحدث المسلسلات / الأفلام** | `stardima-new` / `stardima-new-movies` | جديد الإضافات والحلقات أولاً بأول |
 | **⭐ الأكثر شهرة وتقييماً** | `stardima-top` / `stardima-top-movies` | الأعمال الأعلى تقييماً والأكثر متابعة |
 | **📺 كواكب سبيستون والزهرة** | `stardima-spacetoon` | كافة أعمال ومسلسلات سبيستون وسبيس باور والزهرة |
+| **🎨 كرتون نتورك بالعربية** | `stardima-cn` / `stardima-cn-movies` | مسلسلات وأفلام كرتون نتورك الأيقونية (أولاد الجيران، بن 10، غامبول، دكستر...) |
 | **⏳ كرتون الطيبين (كلاسيك)** | `stardima-classic` / `stardima-classic-movies` | مسلسلات وأفلام الزمن الجميل والعصر الذهبي (قبل 2005) |
 | **🎲 اقتراحات اليوم** | `stardima-daily` / `stardima-daily-movies` | ترشيحات ذكية متجددة يومياً حسب ثيمات مختارة |
 | **📚 كل المسلسلات / الأفلام (أ-ي)** | `stardima` / `stardima-movies` | المكتبة الكاملة مع دعم البحث وفلاتر التصنيف والجودة |

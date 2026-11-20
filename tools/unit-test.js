@@ -136,4 +136,38 @@ test('Worker Bundle Integration Check', async () => {
     assert.equal(imdbCount[imdb], 1, `Duplicate IMDb mapping detected for ${imdb} (slug: ${slug})`);
   }
 });
+test('Catalog Pagination, Skip Support, and Cartoon Network Shelf', async () => {
+  const mod = await import('file://' + path.join(__dirname, '../worker-addon.js'));
+  const worker = mod.default || mod;
 
+  // 1. Verify Manifest
+  const mReq = new Request('http://localhost:7000/manifest.json');
+  const mRes = await worker.fetch(mReq, {}, { waitUntil: () => {} });
+  const manifest = await mRes.json();
+  const catIds = manifest.catalogs.map(c => c.id);
+  assert.ok(catIds.includes('stardima-cn'), 'Must contain stardima-cn shelf');
+  assert.ok(catIds.includes('stardima-cn-movies'), 'Must contain stardima-cn-movies shelf');
+
+  for (const c of manifest.catalogs) {
+    const hasSkip = c.extra && c.extra.some(e => e.name === 'skip');
+    assert.ok(hasSkip, `Catalog ${c.id} must declare skip in extra for Stremio pagination`);
+  }
+
+  // 2. Cartoon Network shelf contains Kids Next Door
+  const cnReq = new Request('http://localhost:7000/catalog/series/stardima-cn.json');
+  const cnRes = await worker.fetch(cnReq, {}, { waitUntil: () => {} });
+  const cnData = await cnRes.json();
+  assert.ok(cnData.metas.some(m => m.name.includes('أولاد الجيران')), 'stardima-cn must contain أولاد الجيران');
+
+  // 3. Stremio pagination on main series catalog (skip=500 reaches item 529)
+  const p0Req = new Request('http://localhost:7000/catalog/series/stardima.json');
+  const p0Res = await worker.fetch(p0Req, {}, { waitUntil: () => {} });
+  const p0Data = await p0Res.json();
+  assert.equal(p0Data.metas.length, 100, 'First page must be capped at 100 for Stremio');
+
+  const p5Req = new Request('http://localhost:7000/catalog/series/stardima/skip=500.json');
+  const p5Res = await worker.fetch(p5Req, {}, { waitUntil: () => {} });
+  const p5Data = await p5Res.json();
+  assert.equal(p5Data.metas.length, 100, 'skip=500 page must have 100 items');
+  assert.ok(p5Data.metas.some(m => m.name.includes('أولاد الجيران')), 'skip=500 page must contain أولاد الجيران');
+});

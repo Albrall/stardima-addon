@@ -18,7 +18,7 @@ const NAME = 'كرتون زمان';
 //   Lulustream ✗ the CDN behind it (tnmr.org) 403s the segments
 // Anything still listed here gets a warning label instead of being hidden.
 const DEAD_FROM_EDGE = /lulustream|savefiles|hgcloud|streamhg/i;
-const VERSION = '3.10.0';
+const VERSION = '3.10.2';
 const ID = 'community.stardima';
 const CHUNK_SIZE = 450; // items per chunked catalog
 // 'single'  = two long catalogs (all series, all movies) — one list, nothing to navigate
@@ -235,7 +235,7 @@ async function episodeIdFor(type, id) {
 // Only these of the site's own categories are surfaced as filters (owner's pick):
 // جييم, سبيستون (+ إصدارات سبيستون), سبيس باور, mbc3. The rest stay in the data
 // (they still boost our derived tags) but are not offered as separate options.
-const SITE_KEEP = ['mbc3', 'sbyston', 'asdarat-sbyston', 'sbys-baor', 'aflam-gyym-jeem'];
+const SITE_KEEP = ['mbc3', 'sbyston', 'asdarat-sbyston', 'sbys-baor', 'aflam-gyym-jeem', 'krton-ntork'];
 function siteGenreLabels() {
   const all = (((INDEX.genres || {}).labels) || []);
   return all.filter(([slug]) => SITE_KEEP.indexOf(slug) >= 0);
@@ -801,7 +801,7 @@ function qualitySortExtra() {
 async function buildManifest(url) {
   const mode = catalogMode(url);
   const arabicNum = (n) => String(n).replace(/\d/g, d => '٠١٢٣٤٥٦٧٨٩'[d]);
-  const searchExtra = [{ name: 'search', isRequired: false }];
+  const searchExtra = [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }];
   const qitems = (INDEX.quality && INDEX.quality.items) || {};
   const topRatedCount = () => {
     const count = (kind) => {
@@ -841,6 +841,7 @@ async function buildManifest(url) {
     series.push({ id: 'stardima-new', type: 'series', name: '🔥 أحدث المسلسلات', extra: searchExtra });
     if (topN.s) series.push({ id: 'stardima-top', type: 'series', name: `⭐ الأعلى تقييمًا (${arabicNum(topN.s)})`, extra: searchExtra });
     series.push({ id: 'stardima-spacetoon', type: 'series', name: '📺 كواكب سبيستون والزهرة', extra: searchExtra });
+    series.push({ id: 'stardima-cn', type: 'series', name: '🎨 مسلسلات كرتون نتورك', extra: searchExtra });
     series.push({ id: 'stardima-classic', type: 'series', name: '⏳ كرتون الطيبين (كلاسيك)', extra: searchExtra });
     series.push({ id: 'stardima-daily', type: 'series', name: `🎲 اقتراحات اليوم — ${today}`, extra: searchExtra });
     series.push({ id: 'stardima', type: 'series', name: '📚 كل المسلسلات (أ-ي)', extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
@@ -849,6 +850,7 @@ async function buildManifest(url) {
     // أفلام: ترتيب منظم ومرن
     movies.push({ id: 'stardima-new-movies', type: 'movie', name: '🔥 أحدث الأفلام', extra: searchExtra });
     if (topN.m) movies.push({ id: 'stardima-top-movies', type: 'movie', name: `⭐ أفلام الأعلى تقييمًا (${arabicNum(topN.m)})`, extra: searchExtra });
+    movies.push({ id: 'stardima-cn-movies', type: 'movie', name: '🎨 أفلام كرتون نتورك', extra: searchExtra });
     movies.push({ id: 'stardima-classic-movies', type: 'movie', name: '⏳ أفلام كلاسيكية (الزمن الجميل)', extra: searchExtra });
     movies.push({ id: 'stardima-daily-movies', type: 'movie', name: `🎲 أفلام مقترحة اليوم — ${today}`, extra: searchExtra });
     movies.push({ id: 'stardima-movies', type: 'movie', name: '📚 كل الأفلام (أ-ي)', extra: [...genreExtra, ...qualitySortExtra(), ...searchExtra] });
@@ -1274,7 +1276,34 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       rows.sort((a, b) => byTitleAr(a.name, b.name));
       const q = (extras.search || '').trim();
       const out = q ? rows.filter((x) => normTitle(x.name).indexOf(normTitle(q)) >= 0) : rows;
-      return json({ metas: out.slice(0, 500) });
+      const sk = parseInt(extras.skip, 10) || 0;
+      return json({ metas: out.slice(sk, sk + 100) });
+    }
+
+    // Cartoon Network shelf (مسلسلات وأفلام كرتون نتورك بالعربية)
+    if (id === 'stardima-cn' || id === 'stardima-cn-movies') {
+      const cnKey = id === 'stardima-cn' ? 'series' : 'movies';
+      const g = INDEX.genres || {};
+      const labels = g.labels || [];
+      const cnSlugs = ['krton-ntork', 'ben10', 'okt-almghamr'];
+      const cnIdxs = cnSlugs.map((s) => labels.findIndex((x) => x[0] === s)).filter((i) => i >= 0);
+      const rows = [];
+      const seen = new Set();
+      for (const it of (((INDEX[cnKey] || {}).items) || [])) {
+        if (isAlias(it[0])) continue;
+        const ps = primarySlug(it[0]);
+        if (seen.has(ps)) continue;
+        const raw = ',' + (g.items[it[0]] || '') + ',' + (g.items[ps] || '') + ',';
+        if (cnIdxs.some((i) => raw.includes(',' + i + ','))) {
+          seen.add(ps);
+          rows.push(toMeta(it));
+        }
+      }
+      rows.sort((a, b) => byTitleAr(a.name, b.name));
+      const q = (extras.search || '').trim();
+      const out = q ? rows.filter((x) => normTitle(x.name).indexOf(normTitle(q)) >= 0) : rows;
+      const sk = parseInt(extras.skip, 10) || 0;
+      return json({ metas: out.slice(sk, sk + 100) });
     }
 
     // Classic golden era (كرتون الطيبين والزمن الجميل - قبل 2005)
@@ -1304,7 +1333,8 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       rows.sort((a, b) => (b.year - a.year) || byTitleAr(a.card.name, b.card.name));
       const q = (extras.search || '').trim();
       const out = q ? rows.filter((x) => normTitle(x.card.name).indexOf(normTitle(q)) >= 0) : rows;
-      return json({ metas: out.map((x) => x.card).slice(0, 500) });
+      const sk = parseInt(extras.skip, 10) || 0;
+      return json({ metas: out.map((x) => x.card).slice(sk, sk + 100) });
     }
 
     // top-rated shelf: needs a real vote count, otherwise a 10.0 from three people wins
@@ -1327,8 +1357,9 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       }
       rows.sort((a, b) => b.vote - a.vote || b.votes - a.votes || byTitleAr(a.card.name, b.card.name));
       const q = (extras.search || '').trim();
-      const out = (q ? rows.filter((x) => normTitle(x.card.name).indexOf(normTitle(q)) >= 0) : rows).slice(0, 500);
-      return json({ metas: out.map((x) => x.card) });
+      const out = q ? rows.filter((x) => normTitle(x.card.name).indexOf(normTitle(q)) >= 0) : rows;
+      const sk = parseInt(extras.skip, 10) || 0;
+      return json({ metas: out.map((x) => x.card).slice(sk, sk + 100) });
     }
 
     // measured-quality shelf: everything we probed at 720p or better, best first
@@ -1343,17 +1374,32 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
       rows.sort((a, b) => b.h - a.h || byTitleAr(a.card.name, b.card.name));
       const q = (extras.search || '').trim();
       const out = q ? rows.filter((x) => normTitle(x.card.name).indexOf(normTitle(q)) >= 0) : rows;
-      return json({ metas: out.map((x) => x.card) });
+      const sk = parseInt(extras.skip, 10) || 0;
+      return json({ metas: out.map((x) => x.card).slice(sk, sk + 100) });
     }
 
     if (id === 'stardima-new' || id === 'stardima-new-movies') {
       const seenNew = new Set(); const fresh = [];
-      for (const it of await newestShelf(key)) {
-        const ps = primarySlug(it[0]);
-        if (seenNew.has(ps)) continue;
-        seenNew.add(ps); fresh.push(it);
+      try {
+        for (const it of await newestShelf(key)) {
+          const ps = primarySlug(it[0]);
+          if (seenNew.has(ps)) continue;
+          seenNew.add(ps); fresh.push(it);
+        }
+      } catch (e) { /* site offline */ }
+      if (fresh.length === 0) {
+        // Fallback to recent embedded entries if live fetch is unavailable
+        const all = (((INDEX[key] || {}).items) || []);
+        for (const it of all.slice(0, 100)) {
+          const ps = primarySlug(it[0]);
+          if (seenNew.has(ps)) continue;
+          seenNew.add(ps); fresh.push(it);
+        }
       }
-      return json({ metas: fresh.map(toMeta) }); // site order = newest first
+      const q = (extras.search || '').trim();
+      const out = q ? fresh.filter((x) => normTitle(x[1]).indexOf(normTitle(q)) >= 0) : fresh;
+      const sk = parseInt(extras.skip, 10) || 0;
+      return json({ metas: out.map(toMeta).slice(sk, sk + 100) });
     }
     let sorted = await sortedItems(key);
     sorted = sorted.filter((it) => !isAlias(it[0])); // duplicate uploads live under the primary entry
@@ -1366,31 +1412,47 @@ document.getElementById('m').textContent='تم النسخ ✓';setTimeout(functi
     }
     const tuned = applyQualitySort(metas, extras, type);
     if (tuned !== metas) { metas.length = 0; metas.push(...tuned); } // same array when nothing was asked for
-    if (extras.skip) { const sk = parseInt(extras.skip, 10) || 0; if (sk > 0) metas.splice(0, sk); }
-    // two works we hold separately can carry the same IMDb id: keep one row per id
+
+    // Deduplicate identical IDs deterministically across the whole catalog first
     const seenIds = new Set();
-    for (let i = metas.length - 1; i >= 0; i--) {
-      if (seenIds.has(metas[i].id)) metas.splice(i, 1); else seenIds.add(metas[i].id);
+    const dedupedMetas = [];
+    for (const it of metas) {
+      if (!seenIds.has(it.id)) {
+        seenIds.add(it.id);
+        dedupedMetas.push(it);
+      }
     }
-    const total = metas.length;
+    const total = dedupedMetas.length;
+
     // Older installs (and ?mode=chunked) still ask for stardima-s3 / stardima-m2
     // style ids — keep serving those as 450-item slices so nothing breaks.
     const isChunkId = /^stardima-[sm]\d+$/.test(id);
-    if (!isChunkId && catalogMode(url) === 'single') {
-      // One long list per type: Nuvio loads it once and scrolls locally.
-      return json({ metas });
+    if (isChunkId || catalogMode(url) === 'chunked') {
+      const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
+      const c = Math.min(Math.max(1, chunkOf(id)), chunks);
+      let start = (c - 1) * CHUNK_SIZE;
+      if (!extras.skip && extras.index != null) {
+        const idx = parseInt(extras.index, 10);
+        if (Number.isFinite(idx) && idx >= 0) start = Math.floor(idx / CHUNK_SIZE) * CHUNK_SIZE;
+      }
+      const end = c === chunks ? total : Math.min(start + CHUNK_SIZE, total);
+      return json({ metas: dedupedMetas.slice(start, end) });
     }
-    const chunks = Math.max(1, Math.ceil(total / CHUNK_SIZE));
-    const c = Math.min(Math.max(1, chunkOf(id)), chunks);
-    // A chunk id carries the row it starts at (index = c*CHUNK); only fall back to the
-    // arithmetic (c-1)*CHUNK when the app did not send one.
-    let start = (c - 1) * CHUNK_SIZE;
-    if (!extras.skip && extras.index != null) {
-      const idx = parseInt(extras.index, 10);
-      if (Number.isFinite(idx) && idx >= 0) start = Math.floor(idx / CHUNK_SIZE) * CHUNK_SIZE;
+
+    // Single mode: standard Stremio pagination (100 items per batch)
+    const PAGE_SIZE = 100;
+    if (extras.skip != null) {
+      const sk = Math.max(0, parseInt(extras.skip, 10) || 0);
+      return json({ metas: dedupedMetas.slice(sk, sk + PAGE_SIZE) });
     }
-    const end = c === chunks ? total : Math.min(start + CHUNK_SIZE, total); // last chunk uncapped
-    return json({ metas: metas.slice(start, end) });
+
+    // Initial page load without skip:
+    // If client is Nuvio without skip, send full list; for Stremio, serve first page of 100
+    const ua = (req.headers.get('user-agent') || '').toLowerCase();
+    if (ua.includes('nuvio')) {
+      return json({ metas: dedupedMetas });
+    }
+    return json({ metas: dedupedMetas.slice(0, PAGE_SIZE) });
   }
 
   // /meta/{type}/{id}.json  (id = tt<imdb> when we know it, otherwise stardima:{slug})
